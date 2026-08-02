@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
+   TRANSPORTER POOLING (Fast Socket Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -31,9 +31,10 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 3,
-      maxMessages: 100
+      pool: true,             // Connection pooling for fast execution
+      maxConnections: 10,     // Increased connections for faster throughput
+      maxMessages: 200,
+      rateLimit: 20           // Fast message rate
     });
     transporters.set(cacheKey, transporter);
   }
@@ -59,7 +60,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK
+   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Rate)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -101,7 +102,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE
+   SSE STREAM ROUTE (INBOX OPTIMIZED & HIGH SPEED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -139,10 +140,21 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
+      // Unique Message-ID generation for anti-spam filtering
+      const domain = senderEmail.split('@')[1] || 'gmail.com';
+      const customMessageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
+
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: spunSubject,
+        headers: {
+          'X-Mailer': 'NodeMailer Bulk Sender',
+          'X-Priority': '3', // Normal Priority
+          'Message-ID': customMessageId,
+          'Date': new Date().toUTCString(),
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
+        }
       };
 
       if (isHtml) {
@@ -160,8 +172,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
+    // ⚡ FAST DELAY: 0.05 seconds (50 milliseconds)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
