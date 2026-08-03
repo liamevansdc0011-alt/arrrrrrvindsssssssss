@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (Fast Socket Reuse)
+   OPTIMIZED GMAIL TRANSPORTER POOLING (TLS Connection Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -31,10 +31,11 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,             // Connection pooling for fast execution
-      maxConnections: 10,     // Increased connections for faster throughput
-      maxMessages: 200,
-      rateLimit: 20           // Fast message rate
+      pool: true,             // Enable socket pooling
+      maxConnections: 5,      // Optimal concurrent sockets for Gmail SMTP
+      maxMessages: 100,       // Max messages per connection before refresh
+      rateLimit: 10,          // Max messages per second
+      secure: true            // Force TLS for better security score
     });
     transporters.set(cacheKey, transporter);
   }
@@ -42,7 +43,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
+   ADVANCED SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
@@ -60,7 +61,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Rate)
+   HTML TO CLEAN PLAIN-TEXT FALLBACK (Dual Multipart MIME for Inbox Delivery)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -102,7 +103,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX OPTIMIZED & HIGH SPEED)
+   SSE STREAM ROUTE (INBOX OPTIMIZED GMAIL-TO-GMAIL ENGINE)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -136,24 +137,29 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
+      
+      // Parse Spintax for subject & body to bypass duplicate content filters
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Unique Message-ID generation for anti-spam filtering
+      // Generating RFC-compliant Message-ID and tracking header
       const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const customMessageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
+      const randomSeed = Math.random().toString(36).substring(2, 10);
+      const customMessageId = `<${Date.now()}.${randomSeed}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         subject: spunSubject,
         headers: {
-          'X-Mailer': 'NodeMailer Bulk Sender',
+          'MIME-Version': '1.0',
+          'X-Mailer': 'Gmail Direct Engine v2',
           'X-Priority': '3', // Normal Priority
           'Message-ID': customMessageId,
           'Date': new Date().toUTCString(),
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
+          'Feedback-ID': `${randomSeed}:${senderEmail}:gmail`
         }
       };
 
@@ -172,9 +178,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ FAST DELAY: 0.05 seconds (50 milliseconds)
+    // High Speed Delay (300ms): Perfect balance to maintain maximum speed without triggering Gmail SMTP Rate Limit (421 error)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
 
