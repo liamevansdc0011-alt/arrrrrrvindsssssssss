@@ -1,29 +1,15 @@
 {
-  "name": "gmail-inbox-pro",
-  "version": "3.0.0",
-  "description": "Ultra-Fast Custom Email Engine for Primary Inbox Delivery",
+  "name": "email-engine",
+  "version": "1.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js"
   },
-  "keywords": [
-    "custom-email-engine",
-    "inbox-delivery",
-    "fast-smtp"
-  ],
-  "author": "Engine Dev",
-  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
-    "imapflow": "^1.0.181",
-    "mailparser": "^3.7.2",
     "nodemailer": "^6.9.15"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
