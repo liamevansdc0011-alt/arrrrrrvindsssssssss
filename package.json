@@ -1,16 +1,28 @@
 {
   "name": "email-sender-app",
   "version": "1.0.0",
+  "description": "High-Speed Gmail-to-Gmail Inbox Bulk Email Engine",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
+  "keywords": [
+    "nodemailer",
+    "express",
+    "bulk-email",
+    "email-sender"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "nodemailer": "^6.9.13"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
