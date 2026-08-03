@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   OPTIMIZED SMTP TRANSPORTER (TLS Hardened)
+   TRANSPORTER POOLING (Fast Socket Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -29,16 +29,12 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true, // SSL/TLS connection
+      service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 3,
-      maxMessages: 50,
-      tls: {
-        rejectUnauthorized: false
-      }
+      pool: true,             // Connection pooling for fast execution
+      maxConnections: 10,     // Increased connections for faster throughput
+      maxMessages: 200,
+      rateLimit: 20           // Fast message rate
     });
     transporters.set(cacheKey, transporter);
   }
@@ -46,7 +42,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   ADVANCED SPINTAX PARSER ({Hi|Hello|Hey})
+   SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
@@ -64,7 +60,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN TEXT CONVERTER (Dual MIME for High Deliverability)
+   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Rate)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -106,7 +102,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (0.5s SPEED WITH ANTI-SPAM PROTECTION)
+   SSE STREAM ROUTE (INBOX OPTIMIZED & HIGH SPEED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -140,26 +136,24 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
-      
-      // Parse Spintax for subject & body to make every mail unique
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Anti-Spam unique headers
-      const messageUniqueId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
+      // Unique Message-ID generation for anti-spam filtering
       const domain = senderEmail.split('@')[1] || 'gmail.com';
+      const customMessageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         subject: spunSubject,
         headers: {
-          'Message-ID': `<${messageUniqueId}@${domain}>`,
-          'X-Entity-Ref-ID': messageUniqueId,
-          'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
-          'Precedence': 'bulk'
+          'X-Mailer': 'NodeMailer Bulk Sender',
+          'X-Priority': '3', // Normal Priority
+          'Message-ID': customMessageId,
+          'Date': new Date().toUTCString(),
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
         }
       };
 
@@ -178,10 +172,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ EXACT 0.5 SECOND DELAY WITH HUMANIZED JITTER (500ms + random 0-100ms)
+    // ⚡ FAST DELAY: 0.05 seconds (50 milliseconds)
     if (index < recipients.length - 1) {
-      const delay = 500 + Math.floor(Math.random() * 100);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
