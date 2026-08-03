@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   OPTIMIZED SMTP TRANSPORTER POOLING (TLS Socket Reuse)
+   AUTHENTIC GMAIL TRANSPORTER
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -31,11 +31,11 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
-      secure: true, // TLS Enforcement
+      secure: true,
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,             // Transporter Connection Pooling
-      maxConnections: 5,      // Max active connections to Gmail
-      maxMessages: 100        // Messages per connection
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 50
     });
     transporters.set(cacheKey, transporter);
   }
@@ -43,7 +43,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   ADVANCED SPINTAX PARSER ({Hi|Hello|Hey})
+   SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
@@ -61,7 +61,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Score)
+   PLAIN TEXT CONVERTER
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -103,7 +103,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX OPTIMIZED ENGINE)
+   INBOX-LANDING SSE STREAM ROUTE
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -138,27 +138,29 @@ app.post("/api/send-stream", async (req, res) => {
     try {
       const transporter = getTransporter(email, appPassword);
 
-      // Parse Spintax to create unique variation per recipient
-      const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
+      // Spintax parsing
+      let spunSubject = parseSpintax(subject);
+      let spunBody = parseSpintax(messageBody);
+
+      // Random Uniqueness Generator (Force Gmail to treat every mail as unique)
+      const randomId = Math.random().toString(36).substring(2, 9);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Dynamic Message-ID generation
-      const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const randomSeed = Math.random().toString(36).substring(2, 9);
-      const customMessageId = `<${Date.now()}.${randomSeed}@${domain}>`;
+      if (isHtml) {
+        spunBody += `<br><span style="display:none;font-size:0px;color:transparent;">Ref: ${randomId}</span>`;
+      } else {
+        spunBody += `\n\nRef: ${randomId}`;
+      }
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         subject: spunSubject,
         headers: {
-          'MIME-Version': '1.0',
-          'X-Mailer': 'Gmail Client Sender',
+          'X-Mailer': 'Gmail Standard Webmail',
           'X-Priority': '3',
-          'Message-ID': customMessageId,
-          'Date': new Date().toUTCString(),
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
+          'Message-ID': `<${Date.now()}.${randomId}@gmail.com>`,
+          'Date': new Date().toUTCString()
         }
       };
 
@@ -177,9 +179,10 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Delay Control (500ms - Gmail safe threshold)
+    // Safe 0.8s - 1.2s delay to prevent Gmail Anti-Spam Trigger
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const safeDelay = 800 + Math.floor(Math.random() * 400);
+      await new Promise(resolve => setTimeout(resolve, safeDelay));
     }
   }
 
