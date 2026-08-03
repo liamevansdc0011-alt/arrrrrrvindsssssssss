@@ -32,7 +32,7 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 5,
+      maxConnections: 3,
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -101,7 +101,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (0.5 SECOND DELAY LOOP)
+   SSE STREAM ROUTE (STABLE & SECURE LOOP)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -139,18 +139,10 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Random string to make Message-ID unique
-      const randomSeed = Math.random().toString(36).substring(2, 8);
-
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject,
-        headers: {
-          'Message-ID': `<${Date.now()}.${randomSeed}@gmail.com>`,
-          'Date': new Date().toUTCString(),
-          'X-Mailer': 'Express Nodemailer Client'
-        }
+        subject: spunSubject
       };
 
       if (isHtml) {
@@ -168,9 +160,8 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ EXACT 0.5 SECOND DELAY (500ms)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
   }
 
