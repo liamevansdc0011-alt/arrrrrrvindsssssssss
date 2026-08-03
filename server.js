@@ -179,9 +179,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe 0.8s - 1.2s delay to prevent Gmail Anti-Spam Trigger
+    // Safe 0.5s - 1.1s delay to prevent Gmail Anti-Spam Trigger
     if (index < recipients.length - 1) {
-      const safeDelay = 800 + Math.floor(Math.random() * 400);
+      const safeDelay = 400 + Math.floor(Math.random() * 300);
       await new Promise(resolve => setTimeout(resolve, safeDelay));
     }
   }
