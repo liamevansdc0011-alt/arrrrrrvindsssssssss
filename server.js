@@ -4,7 +4,6 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,60 +12,59 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Middleware
+// Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const globalState = { stopFlag: false };
-const poolMap = new Map();
+const activeSessions = {};
+const transporters = new Map();
 
 /* ==========================================================================
-   DYNAMIC SMTP CONNECTION POOL (Fast Socket Re-use)
+   TRANSPORTER POOLING (Fast Socket Reuse)
    ========================================================================== */
-function buildSMTPClient(userEmail, appPass) {
-  const account = userEmail.toLowerCase().trim();
-  const key = `${account}:${appPass}`;
+function getTransporter(email, appPassword) {
+  const cleanEmail = email.toLowerCase().trim();
+  const cacheKey = `${cleanEmail}_${appPassword}`;
 
-  if (!poolMap.has(key)) {
-    const client = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: { user: account, pass: appPass },
-      pool: true,
-      maxConnections: 5,
-      maxMessages: 100,
-      socketTimeout: 15000
+  if (!transporters.has(cacheKey)) {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: cleanEmail, pass: appPassword },
+      pool: true,             // Connection pooling for fast execution
+      maxConnections: 10,     // Increased connections for faster throughput
+      maxMessages: 200,
+      rateLimit: 20           // Fast message rate
     });
-    poolMap.set(key, client);
+    transporters.set(cacheKey, transporter);
   }
-  return poolMap.get(key);
+  return transporters.get(cacheKey);
 }
 
 /* ==========================================================================
-   RECURSIVE SPINTAX TRANSFORMER ({A|B|C})
+   SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
-function processSpintax(input) {
-  if (!input) return "";
-  let result = input;
-  const pattern = /\{([^{}]+)\}/g;
-  
-  while (pattern.test(result)) {
-    result = result.replace(pattern, (_, options) => {
-      const choices = options.split('|');
-      return choices[Math.floor(Math.random() * choices.length)];
+function parseSpintax(text) {
+  if (!text) return "";
+  let spun = text;
+  const regex = /{([^{}]+)}/g;
+  let iterations = 0;
+  while (regex.test(spun) && iterations < 10) {
+    spun = spun.replace(regex, (_, choices) => {
+      const options = choices.split('|');
+      return options[Math.floor(Math.random() * options.length)];
     });
+    iterations++;
   }
-  return result;
+  return spun;
 }
 
 /* ==========================================================================
-   HIGH-INBOX TEXT FALLBACK GENERATOR
+   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Rate)
    ========================================================================== */
-function generateCleanText(htmlContent) {
-  if (!htmlContent) return "";
-  return htmlContent
+function convertHtmlToText(html) {
+  if (!html) return "";
+  return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -74,34 +72,37 @@ function generateCleanText(htmlContent) {
     .replace(/<\/div>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
 /* ==========================================================================
-   AUTHENTICATION API
+   AUTHENTICATION ROUTES
    ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
-  return res.status(401).json({ success: false, message: "Invalid key" });
+  return res.status(401).json({ success: false, message: "Incorrect password" });
 });
 
 app.post("/api/verify", async (req, res) => {
   const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Missing auth data" });
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
 
   try {
-    const smtpClient = buildSMTPClient(email, appPassword);
-    await smtpClient.verify();
-    return res.json({ success: true, message: "SMTP Connected Successfully" });
-  } catch (err) {
-    return res.status(401).json({ success: false, message: "Auth Error: " + err.message });
+    const transporter = getTransporter(email, appPassword);
+    await transporter.verify();
+    return res.json({ success: true, message: "SMTP verified successfully" });
+  } catch (error) {
+    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
   }
 });
 
 /* ==========================================================================
-   STREAM ENGINE (0.5 SEC DELAY & UNIQUE HEADERS PER RECIPIENT)
+   SSE STREAM ROUTE (INBOX OPTIMIZED & HIGH SPEED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -112,69 +113,68 @@ app.post("/api/send-stream", async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Required fields missing" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
     res.end();
     return;
   }
 
-  const senderAddr = email.toLowerCase().trim();
-  const displayName = (senderName || "").replace(/"/g, "").trim();
+  const senderEmail = email.toLowerCase().trim();
+  const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
 
-  globalState.stopFlag = false;
+  activeSessions['global_stop'] = false;
 
-  for (let idx = 0; idx < recipients.length; idx++) {
-    if (globalState.stopFlag) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Process cancelled" })}\n\n`);
+  for (let index = 0; index < recipients.length; index++) {
+    if (activeSessions['global_stop']) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
       break;
     }
 
-    const targetEmail = recipients[idx] ? recipients[idx].trim() : "";
-    if (!targetEmail) continue;
+    const recipient = recipients[index] ? recipients[index].trim() : "";
+    if (!recipient) continue;
 
     res.write(': keep-alive\n\n');
 
     try {
-      const client = buildSMTPClient(email, appPassword);
-      
-      // Dynamic content variation
-      const finalSubject = processSpintax(subject);
-      let finalBody = processSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(finalBody);
+      const transporter = getTransporter(email, appPassword);
+      const spunSubject = parseSpintax(subject);
+      const spunBody = parseSpintax(messageBody);
+      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Generate unique identifier to bypass duplicate content filters
-      const uniqueHash = crypto.randomBytes(6).toString('hex');
-      const timeStamp = Date.now();
+      // Unique Message-ID generation for anti-spam filtering
+      const domain = senderEmail.split('@')[1] || 'gmail.com';
+      const customMessageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
 
-      const mailData = {
-        from: displayName ? `"${displayName}" <${senderAddr}>` : senderAddr,
-        to: targetEmail,
-        subject: finalSubject,
+      const mailOptions = {
+        from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
+        to: recipient,
+        subject: spunSubject,
         headers: {
-          'Message-ID': `<${timeStamp}.${uniqueHash}@mail.gmail.com>`,
-          'X-Gmail-Original-Message-ID': `${uniqueHash}`,
-          'X-Mailer': 'Gmail Desktop Client (v11.0)',
-          'Date': new Date().toUTCString()
+          'X-Mailer': 'NodeMailer Bulk Sender',
+          'X-Priority': '3', // Normal Priority
+          'Message-ID': customMessageId,
+          'Date': new Date().toUTCString(),
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
         }
       };
 
       if (isHtml) {
-        mailData.html = finalBody;
-        mailData.text = generateCleanText(finalBody);
+        mailOptions.html = spunBody;
+        mailOptions.text = convertHtmlToText(spunBody);
       } else {
-        mailData.text = finalBody;
+        mailOptions.text = spunBody;
       }
 
-      await client.sendMail(mailData);
-      res.write(`data: ${JSON.stringify({ success: true, recipient: targetEmail })}\n\n`);
+      await transporter.sendMail(mailOptions);
+      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
 
-    } catch (err) {
-      console.error(`Failed sending to ${targetEmail}:`, err.message);
-      res.write(`data: ${JSON.stringify({ success: false, recipient: targetEmail, error: err.message })}\n\n`);
+    } catch (error) {
+      console.error(`Error sending to ${recipient}:`, error.message);
+      res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ EXACT 0.5 SECONDS SPEED (500ms delay)
-    if (idx < recipients.length - 1) {
-      await new Promise(res => setTimeout(res, 500));
+    // ⚡ FAST DELAY: 0.05 seconds (50 milliseconds)
+    if (index < recipients.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
@@ -183,15 +183,15 @@ app.post("/api/send-stream", async (req, res) => {
 });
 
 /* ==========================================================================
-   CANCEL/STOP API
+   STOP ROUTE
    ========================================================================== */
 app.post("/api/stop", (req, res) => {
-  globalState.stopFlag = true;
-  res.json({ success: true, message: "Engine stopped" });
+  activeSessions['global_stop'] = true;
+  res.json({ success: true, message: "Stop process registered" });
 });
 
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => console.log(`Inbox Engine active on port ${PORT}`));
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
 export default app;
