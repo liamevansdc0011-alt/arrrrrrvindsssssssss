@@ -141,7 +141,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // SAFE HUMAN DELAY (0.2 - 0.1 seconds)
+    // SAFE HUMAN DELAY (0.2 - 0.3 seconds)
     if (index < recipients.length - 1) {
       const safeDelay = 300 + Math.floor(Math.random() * 250);
       await new Promise(resolve => setTimeout(resolve, safeDelay));
