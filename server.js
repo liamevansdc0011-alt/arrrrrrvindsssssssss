@@ -4,68 +4,69 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// State Tracker
-const globalSession = { isStopped: false };
-const transporterPool = new Map();
-
-// Middlewares
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+const globalState = { stopFlag: false };
+const poolMap = new Map();
+
 /* ==========================================================================
-   HELPER FUNCTIONS
+   DYNAMIC SMTP CONNECTION POOL (Fast Socket Re-use)
    ========================================================================== */
+function buildSMTPClient(userEmail, appPass) {
+  const account = userEmail.toLowerCase().trim();
+  const key = `${account}:${appPass}`;
 
-function getTransporter(email, appPassword) {
-  const cleanEmail = email.toLowerCase().trim();
-  const poolKey = `${cleanEmail}_${appPassword}`;
-
-  if (!transporterPool.has(poolKey)) {
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: cleanEmail,
-        pass: appPassword
-      },
+  if (!poolMap.has(key)) {
+    const client = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: account, pass: appPass },
       pool: true,
-      maxConnections: 2,
+      maxConnections: 5,
       maxMessages: 100,
-      socketTimeout: 25000
+      socketTimeout: 15000
     });
-    transporterPool.set(poolKey, transporter);
+    poolMap.set(key, client);
   }
-
-  return transporterPool.get(poolKey);
+  return poolMap.get(key);
 }
 
-function parseSpintax(text) {
-  if (!text) return "";
-  let spun = text;
-  const regex = /{([^{}]+)}/g;
-  let iterations = 0;
+/* ==========================================================================
+   RECURSIVE SPINTAX TRANSFORMER ({A|B|C})
+   ========================================================================== */
+function processSpintax(input) {
+  if (!input) return "";
+  let result = input;
+  const pattern = /\{([^{}]+)\}/g;
   
-  while (regex.test(spun) && iterations < 10) {
-    spun = spun.replace(regex, (_, choices) => {
-      const options = choices.split('|');
-      return options[Math.floor(Math.random() * options.length)];
+  while (pattern.test(result)) {
+    result = result.replace(pattern, (_, options) => {
+      const choices = options.split('|');
+      return choices[Math.floor(Math.random() * choices.length)];
     });
-    iterations++;
   }
-  return spun;
+  return result;
 }
 
-function stripHtmlToPlain(html) {
-  if (!html) return "";
-  return html
+/* ==========================================================================
+   HIGH-INBOX TEXT FALLBACK GENERATOR
+   ========================================================================== */
+function generateCleanText(htmlContent) {
+  if (!htmlContent) return "";
+  return htmlContent
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -73,45 +74,36 @@ function stripHtmlToPlain(html) {
     .replace(/<\/div>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
 /* ==========================================================================
-   ROUTES
+   AUTHENTICATION API
    ========================================================================== */
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.post('/api/auth', (req, res) => {
+app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (password === SITE_PASSWORD) {
-    return res.json({ success: true, message: "Authorized" });
-  }
-  return res.status(401).json({ success: false, message: "Unauthorized password" });
+  if (password === SITE_PASSWORD) return res.json({ success: true });
+  return res.status(401).json({ success: false, message: "Invalid key" });
 });
 
-app.post('/api/verify', async (req, res) => {
+app.post("/api/verify", async (req, res) => {
   const { email, appPassword } = req.body;
-  if (!email || !appPassword) {
-    return res.status(400).json({ success: false, message: "Email and App Password required" });
-  }
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Missing auth data" });
 
   try {
-    const transporter = getTransporter(email, appPassword);
-    await transporter.verify();
-    return res.json({ success: true, message: "SMTP credentials verified" });
+    const smtpClient = buildSMTPClient(email, appPassword);
+    await smtpClient.verify();
+    return res.json({ success: true, message: "SMTP Connected Successfully" });
   } catch (err) {
-    return res.status(401).json({ success: false, message: "SMTP Connection failed" });
+    return res.status(401).json({ success: false, message: "Auth Error: " + err.message });
   }
 });
 
-app.post('/api/send-stream', async (req, res) => {
+/* ==========================================================================
+   STREAM ENGINE (0.5 SEC DELAY & UNIQUE HEADERS PER RECIPIENT)
+   ========================================================================== */
+app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -120,85 +112,86 @@ app.post('/api/send-stream', async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Invalid payload parameters" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: "Required fields missing" })}\n\n`);
     res.end();
     return;
   }
 
-  const senderEmail = email.toLowerCase().trim();
-  const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
-  globalSession.isStopped = false;
+  const senderAddr = email.toLowerCase().trim();
+  const displayName = (senderName || "").replace(/"/g, "").trim();
 
-  const heartbeat = setInterval(() => {
-    res.write(': keep-alive\n\n');
-  }, 10000);
+  globalState.stopFlag = false;
 
-  for (let i = 0; i < recipients.length; i++) {
-    if (globalSession.isStopped) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Process stopped by user" })}\n\n`);
+  for (let idx = 0; idx < recipients.length; idx++) {
+    if (globalState.stopFlag) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Process cancelled" })}\n\n`);
       break;
     }
 
-    const recipient = recipients[i] ? recipients[i].trim() : "";
-    if (!recipient) continue;
+    const targetEmail = recipients[idx] ? recipients[idx].trim() : "";
+    if (!targetEmail) continue;
+
+    res.write(': keep-alive\n\n');
 
     try {
-      const transporter = getTransporter(email, appPassword);
+      const client = buildSMTPClient(email, appPassword);
       
-      const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+      // Dynamic content variation
+      const finalSubject = processSpintax(subject);
+      let finalBody = processSpintax(messageBody);
+      const isHtml = /<[a-z][\s\S]*>/i.test(finalBody);
 
-      const mailOptions = {
-        from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
-        to: recipient,
-        replyTo: senderEmail,
-        subject: spunSubject,
+      // Generate unique identifier to bypass duplicate content filters
+      const uniqueHash = crypto.randomBytes(6).toString('hex');
+      const timeStamp = Date.now();
+
+      const mailData = {
+        from: displayName ? `"${displayName}" <${senderAddr}>` : senderAddr,
+        to: targetEmail,
+        subject: finalSubject,
         headers: {
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`,
-          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+          'Message-ID': `<${timeStamp}.${uniqueHash}@mail.gmail.com>`,
+          'X-Gmail-Original-Message-ID': `${uniqueHash}`,
+          'X-Mailer': 'Gmail Desktop Client (v11.0)',
+          'Date': new Date().toUTCString()
         }
       };
 
       if (isHtml) {
-        mailOptions.html = spunBody;
-        mailOptions.text = stripHtmlToPlain(spunBody);
+        mailData.html = finalBody;
+        mailData.text = generateCleanText(finalBody);
       } else {
-        mailOptions.text = spunBody;
+        mailData.text = finalBody;
       }
 
-      await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
+      await client.sendMail(mailData);
+      res.write(`data: ${JSON.stringify({ success: true, recipient: targetEmail })}\n\n`);
 
-    } catch (error) {
-      console.error(`Error sending to ${recipient}:`, error.message);
-      res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
+    } catch (err) {
+      console.error(`Failed sending to ${targetEmail}:`, err.message);
+      res.write(`data: ${JSON.stringify({ success: false, recipient: targetEmail, error: err.message })}\n\n`);
     }
 
-    // SAFE & FAST DELAY ENGINE
-    if (i < recipients.length - 1) {
-      // 1.8 से 2.8 सेकंड का फ़ास्ट लेकिन सेफ़ डिले
-      let delay = Math.floor(1800 + Math.random() * 1000); 
-
-      // हर 15 मेल के बाद 15 सेकंड का छोटा ब्रेक (Spam Detection रोकने के लिए)
-      if ((i + 1) % 15 === 0) {
-        delay += 15000;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, delay));
+    // ⚡ EXACT 0.5 SECONDS SPEED (500ms delay)
+    if (idx < recipients.length - 1) {
+      await new Promise(res => setTimeout(res, 500));
     }
   }
 
-  clearInterval(heartbeat);
   res.write("data: [DONE]\n\n");
   res.end();
 });
 
-app.post('/api/stop', (req, res) => {
-  globalSession.isStopped = true;
-  res.json({ success: true, message: "Stop signal received" });
+/* ==========================================================================
+   CANCEL/STOP API
+   ========================================================================== */
+app.post("/api/stop", (req, res) => {
+  globalState.stopFlag = true;
+  res.json({ success: true, message: "Engine stopped" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`Inbox Engine active on port ${PORT}`));
+}
+
+export default app;
