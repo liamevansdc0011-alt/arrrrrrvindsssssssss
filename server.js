@@ -9,10 +9,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-
+const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Express Middleware Setup
+// Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
+   OPTIMIZED GMAIL TRANSPORTER POOLING (TLS Connection Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -31,9 +31,11 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 3,
-      maxMessages: 100
+      pool: true,             // Enable socket pooling
+      maxConnections: 5,      // Optimal concurrent sockets for Gmail SMTP
+      maxMessages: 100,       // Max messages per connection before refresh
+      rateLimit: 10,          // Max messages per second
+      secure: true            // Force TLS for better security score
     });
     transporters.set(cacheKey, transporter);
   }
@@ -41,7 +43,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
+   ADVANCED SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
@@ -59,7 +61,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
+   HTML TO CLEAN PLAIN-TEXT FALLBACK (Dual Multipart MIME for Inbox Delivery)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -101,13 +103,13 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (STABLE & SECURE LOOP)
+   SSE STREAM ROUTE (INBOX OPTIMIZED GMAIL-TO-GMAIL ENGINE)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Prevents proxy buffering on Vercel/Nginx
+  res.setHeader('X-Accel-Buffering', 'no');
 
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
@@ -131,19 +133,34 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
-    // Connection keep-alive ping
     res.write(': keep-alive\n\n');
 
     try {
       const transporter = getTransporter(email, appPassword);
+      
+      // Parse Spintax for subject & body to bypass duplicate content filters
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
+      // Generating RFC-compliant Message-ID and tracking header
+      const domain = senderEmail.split('@')[1] || 'gmail.com';
+      const randomSeed = Math.random().toString(36).substring(2, 10);
+      const customMessageId = `<${Date.now()}.${randomSeed}@${domain}>`;
+
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: spunSubject,
+        headers: {
+          'MIME-Version': '1.0',
+          'X-Mailer': 'Gmail Direct Engine v2',
+          'X-Priority': '3', // Normal Priority
+          'Message-ID': customMessageId,
+          'Date': new Date().toUTCString(),
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
+          'Feedback-ID': `${randomSeed}:${senderEmail}:gmail`
+        }
       };
 
       if (isHtml) {
@@ -161,9 +178,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe 1.5-Second Delay to avoid socket crashing
+    // High Speed Delay (300ms): Perfect balance to maintain maximum speed without triggering Gmail SMTP Rate Limit (421 error)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
 
@@ -179,7 +196,8 @@ app.post("/api/stop", (req, res) => {
   res.json({ success: true, message: "Stop process registered" });
 });
 
-/* ==========================================================================
-   VERCEL / SERVERLESS HANDLER EXPORT
-   ========================================================================== */
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
+
 export default app;
