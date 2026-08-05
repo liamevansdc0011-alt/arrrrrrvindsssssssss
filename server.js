@@ -13,131 +13,87 @@ const app = express();
 const SITE_PASSWORD = process.env.SITE_PASSWORD || "##";
 
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json({limit:"50mb"}));
+app.use(express.static(path.join(__dirname,"public")));
 
-const activeSessions = {
-  stop: false
-};
 
 const transporters = new Map();
 
-
-/*
-==================================================
-TRANSPORTER POOL
-==================================================
-*/
-
-function getTransporter(email, appPassword) {
-
-  const cleanEmail = email.toLowerCase().trim();
-
-  const key = `${cleanEmail}_${appPassword}`;
-
-  if (!transporters.has(key)) {
-
-    const transporter = nodemailer.createTransport({
-
-      service: "gmail",
-
-      auth: {
-        user: cleanEmail,
-        pass: appPassword
-      },
-
-      pool: true,
-
-      maxConnections: 2,
-
-      maxMessages: Infinity,
-
-      socketTimeout: 60000,
-
-      connectionTimeout: 30000,
-
-      greetingTimeout: 30000
-
-    });
-
-
-    transporters.set(key, transporter);
-
-  }
-
-
-  return transporters.get(key);
-
-}
+let stopSending = false;
 
 
 
-/*
-==================================================
-HELPERS
-==================================================
-*/
+function getTransporter(email, appPassword){
+
+    const user = email.toLowerCase().trim();
+
+    const key = user + "_" + appPassword;
 
 
-const sleep = (ms) =>
-  new Promise(resolve => setTimeout(resolve, ms));
+    if(!transporters.has(key)){
 
 
+        const transporter = nodemailer.createTransport({
 
-function parseSpintax(text = "") {
+            host:"smtp.gmail.com",
 
-  const regex = /{([^{}]+)}/g;
+            port:587,
 
-  let result = text;
+            secure:false,
 
-  let count = 0;
+            auth:{
+                user,
+                pass:appPassword
+            },
+
+            pool:true,
+
+            maxConnections:1,
+
+            maxMessages:50,
+
+            connectionTimeout:30000,
+
+            socketTimeout:60000,
+
+            tls:{
+                rejectUnauthorized:true
+            }
+
+        });
 
 
-  while(regex.test(result) && count < 10){
+        transporters.set(key, transporter);
 
-    result = result.replace(
-      regex,
-      (_, options)=>{
-
-        const arr = options.split("|");
-
-        return arr[
-          Math.floor(Math.random()*arr.length)
-        ];
-
-      }
-    );
-
-    count++;
-
-  }
+    }
 
 
-  return result;
+    return transporters.get(key);
 
 }
 
 
 
 
-function htmlToText(html = "") {
+function sleep(ms){
+
+    return new Promise(resolve=>setTimeout(resolve,ms));
+
+}
+
+
+
+
+function htmlToText(html=""){
 
 return html
-
 .replace(/<style[\s\S]*?<\/style>/gi,"")
-
 .replace(/<script[\s\S]*?<\/script>/gi,"")
-
 .replace(/<br\s*\/?>/gi,"\n")
-
 .replace(/<\/p>/gi,"\n\n")
-
 .replace(/<[^>]+>/g,"")
-
 .replace(/&nbsp;/g," ")
-
 .replace(/&amp;/g,"&")
-
 .trim();
 
 }
@@ -145,106 +101,38 @@ return html
 
 
 
-
-/*
-==================================================
-PASSWORD LOGIN
-==================================================
-*/
-
-
-app.post("/api/auth",(req,res)=>{
-
-
-const {password}=req.body;
-
-
-if(password===SITE_PASSWORD){
-
-return res.json({
-success:true
-});
-
-}
-
-
-res.status(401).json({
-
-success:false,
-
-message:"Wrong password"
-
-});
-
-
-});
-
-
-
-
-
-
-/*
-==================================================
-SMTP VERIFY
-==================================================
-*/
-
-
 app.post("/api/verify",async(req,res)=>{
 
 
-const {
-email,
-appPassword
-}=req.body;
-
-
-
-if(!email || !appPassword){
-
-return res.status(400).json({
-
-success:false,
-
-message:"Credentials missing"
-
-});
-
-}
-
+const {email,appPassword}=req.body;
 
 
 try{
-
 
 const transporter =
 getTransporter(email,appPassword);
 
 
-
 await transporter.verify();
 
 
-
 res.json({
-
 success:true,
-
-message:"SMTP Connected"
-
+message:"SMTP verified"
 });
 
 
+}
+catch(error){
 
-}catch(error){
+console.log("VERIFY ERROR:",error.message);
 
 
 res.status(401).json({
 
 success:false,
 
-message:"SMTP verification failed"
+message:error.message
 
 });
 
@@ -252,7 +140,6 @@ message:"SMTP verification failed"
 }
 
 
-
 });
 
 
@@ -261,31 +148,13 @@ message:"SMTP verification failed"
 
 
 
-
-/*
-==================================================
-SEND EMAIL STREAM
-==================================================
-*/
-
-
 app.post("/api/send-stream",async(req,res)=>{
 
 
-res.setHeader(
-"Content-Type",
-"text/event-stream"
-);
+res.setHeader("Content-Type","text/event-stream");
+res.setHeader("Cache-Control","no-cache");
+res.setHeader("Connection","keep-alive");
 
-res.setHeader(
-"Cache-Control",
-"no-cache"
-);
-
-res.setHeader(
-"Connection",
-"keep-alive"
-);
 
 
 const {
@@ -306,20 +175,16 @@ recipients
 
 
 
+if(!email || !appPassword || !Array.isArray(recipients)){
 
-if(
-!email ||
-!appPassword ||
-!Array.isArray(recipients) ||
-recipients.length===0
-){
 
-res.write(
-`data:${JSON.stringify({
+res.write(`data:${JSON.stringify({
+
 success:false,
-error:"Invalid data"
-})}\n\n`
-);
+
+error:"Invalid request"
+
+})}\n\n`);
 
 
 return res.end();
@@ -329,48 +194,32 @@ return res.end();
 
 
 
-
-activeSessions.stop=false;
+stopSending=false;
 
 
 
 const transporter =
-getTransporter(
-email,
-appPassword
-);
+getTransporter(email,appPassword);
 
 
 
-const sender =
-email.toLowerCase().trim();
+for(let i=0;i<recipients.length;i++){
 
 
 
-for(
-let i=0;
-i<recipients.length;
-i++
-){
+if(stopSending){
 
+res.write(`data:${JSON.stringify({
 
-
-if(activeSessions.stop){
-
-
-res.write(
-`data:${JSON.stringify({
 success:false,
-error:"Stopped"
-})}\n\n`
-);
 
+error:"Stopped"
+
+})}\n\n`);
 
 break;
 
-
 }
-
 
 
 
@@ -379,27 +228,15 @@ recipients[i].trim();
 
 
 
-if(!receiver)
-continue;
-
+if(!receiver) continue;
 
 
 
 try{
 
 
-const finalSubject =
-parseSpintax(subject);
-
-
-
-const finalBody =
-parseSpintax(messageBody);
-
-
-
 const isHTML =
-/<[a-z][\s\S]*>/i.test(finalBody);
+/<[a-z][\s\S]*>/i.test(messageBody);
 
 
 
@@ -409,16 +246,15 @@ const mail={
 from:
 senderName
 ?
-`"${senderName}" <${sender}>`
+`"${senderName}" <${email}>`
 :
-sender,
+email,
 
 
 to:receiver,
 
 
-subject:finalSubject
-
+subject:subject
 
 
 };
@@ -427,19 +263,17 @@ subject:finalSubject
 
 if(isHTML){
 
+mail.html=messageBody;
 
-mail.html=finalBody;
-
-mail.text=htmlToText(finalBody);
-
-
-}else{
-
-
-mail.text=finalBody;
-
+mail.text=htmlToText(messageBody);
 
 }
+else{
+
+mail.text=messageBody;
+
+}
+
 
 
 
@@ -447,17 +281,19 @@ await transporter.sendMail(mail);
 
 
 
-res.write(
-`data:${JSON.stringify({
+console.log("SENT:",receiver);
+
+
+
+res.write(`data:${JSON.stringify({
 
 success:true,
 
 recipient:receiver,
 
-index:i+1
+count:i+1
 
-})}\n\n`
-);
+})}\n\n`);
 
 
 
@@ -466,8 +302,11 @@ index:i+1
 catch(error){
 
 
-res.write(
-`data:${JSON.stringify({
+console.log("SEND ERROR:",error.message);
+
+
+
+res.write(`data:${JSON.stringify({
 
 success:false,
 
@@ -475,8 +314,7 @@ recipient:receiver,
 
 error:error.message
 
-})}\n\n`
-);
+})}\n\n`);
 
 
 }
@@ -485,27 +323,22 @@ error:error.message
 
 
 
-// 0.5 SECOND SAFE DELAY
+// 500ms delay
 
-if(i < recipients.length-24){
+if(i < recipients.length-1){
 
 await sleep(500);
 
 }
 
 
-
 }
 
 
 
-res.write(
-"data:[DONE]\n\n"
-);
-
+res.write("data:[DONE]\n\n");
 
 res.end();
-
 
 
 });
@@ -516,17 +349,10 @@ res.end();
 
 
 
-/*
-==================================================
-STOP SENDING
-==================================================
-*/
-
-
 app.post("/api/stop",(req,res)=>{
 
 
-activeSessions.stop=true;
+stopSending=true;
 
 
 res.json({
@@ -543,6 +369,11 @@ message:"Stopped"
 
 
 
+app.listen(process.env.PORT || 3000,()=>{
 
+console.log(
+"Server running on port",
+process.env.PORT || 3000
+);
 
-export default app;
+});
