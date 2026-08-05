@@ -9,8 +9,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
+// Express Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -18,7 +20,9 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* TRANSPORTER POOLING */
+/* ==========================================================================
+   TRANSPORTER POOLING (TLS Socket Reuse)
+   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -28,15 +32,17 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // Single connection for safer delivery rate
-      maxMessages: 50
+      maxConnections: 3,
+      maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* SPINTAX PARSER */
+/* ==========================================================================
+   SPINTAX PARSER ({Hi|Hello|Hey})
+   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -52,7 +58,9 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* HTML TO PLAIN-TEXT FALLBACK */
+/* ==========================================================================
+   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
+   ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -70,7 +78,9 @@ function convertHtmlToText(html) {
     .trim();
 }
 
-/* AUTHENTICATION ROUTES */
+/* ==========================================================================
+   AUTHENTICATION ROUTES
+   ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
@@ -90,14 +100,16 @@ app.post("/api/verify", async (req, res) => {
   }
 });
 
-/* SSE STREAM ROUTE WITH INBOX OPTIMIZATIONS */
+/* ==========================================================================
+   SSE STREAM ROUTE (STABLE & SECURE LOOP)
+   ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('X-Accel-Buffering', 'no'); // Prevents proxy buffering on Vercel/Nginx
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, delayMs = 3000 } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
@@ -119,6 +131,7 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
+    // Connection keep-alive ping
     res.write(': keep-alive\n\n');
 
     try {
@@ -127,20 +140,10 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
-
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
-        replyTo: senderEmail,
         to: recipient,
-        subject: spunSubject,
-        headers: {
-          'Message-ID': uniqueMsgId,
-          'X-Mailer': 'Nodemailer Express Engine',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
-          'Precedence': 'bulk'
-        }
+        subject: spunSubject
       };
 
       if (isHtml) {
@@ -158,10 +161,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Dynamic Safe Delay (Default 0.5 seconds per email to prevent spam trigger)
+    // Safe 0.5-Second Delay to avoid socket crashing
     if (index < recipients.length - 1) {
-      const waitTime = Math.max(200, Number(delayMs) || 400);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
   }
 
@@ -169,10 +171,15 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
-/* STOP ROUTE */
+/* ==========================================================================
+   STOP ROUTE
+   ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
 });
 
+/* ==========================================================================
+   VERCEL / SERVERLESS HANDLER EXPORT
+   ========================================================================== */
 export default app;
