@@ -9,180 +9,371 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Express Middleware Setup
+const SITE_PASSWORD = process.env.SITE_PASSWORD || "##";
+
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json({limit:"50mb"}));
+app.use(express.static(path.join(__dirname,"public")));
 
-const activeSessions = {};
+
 const transporters = new Map();
 
-/* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
-   ========================================================================== */
-function getTransporter(email, appPassword) {
-  const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
+let stopSending = false;
 
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 1, // High connection count triggers instant spam flagging
-      maxMessages: 50
-    });
-    transporters.set(cacheKey, transporter);
-  }
-  return transporters.get(cacheKey);
-}
 
-/* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
-function parseSpintax(text) {
-  if (!text) return "";
-  let spun = text;
-  const regex = /\{([^{}]+)\}/g;
-  let iterations = 0;
-  while (regex.test(spun) && iterations < 10) {
-    spun = spun.replace(regex, (_, choices) => {
-      const options = choices.split('|');
-      return options[Math.floor(Math.random() * options.length)];
-    });
-    iterations++;
-  }
-  return spun;
-}
 
-/* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
-   ========================================================================== */
-function convertHtmlToText(html) {
-  if (!html) return "";
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\n\s*\n/g, '\n\n')
-    .trim();
-}
+function getTransporter(email, appPassword){
 
-/* ==========================================================================
-   AUTHENTICATION ROUTES
-   ========================================================================== */
-app.post("/api/auth", (req, res) => {
-  const { password } = req.body;
-  if (password === SITE_PASSWORD) return res.json({ success: true });
-  return res.status(401).json({ success: false, message: "Incorrect password" });
-});
+    const user = email.toLowerCase().trim();
 
-app.post("/api/verify", async (req, res) => {
-  const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
+    const key = user + "_" + appPassword;
 
-  try {
-    const transporter = getTransporter(email, appPassword);
-    await transporter.verify();
-    return res.json({ success: true, message: "SMTP verified successfully" });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
-  }
-});
 
-/* ==========================================================================
-   SSE STREAM ROUTE (SAFE HUMAN RATE)
-   ========================================================================== */
-app.post("/api/send-stream", async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
+    if(!transporters.has(key)){
 
-  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
-  if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
-    res.end();
-    return;
-  }
+        const transporter = nodemailer.createTransport({
 
-  const senderEmail = email.toLowerCase().trim();
-  const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
+            host:"smtp.gmail.com",
 
-  activeSessions['global_stop'] = false;
+            port:587,
 
-  for (let index = 0; index < recipients.length; index++) {
-    if (activeSessions['global_stop']) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
-      break;
+            secure:false,
+
+            auth:{
+                user,
+                pass:appPassword
+            },
+
+            pool:true,
+
+            maxConnections:1,
+
+            maxMessages:50,
+
+            connectionTimeout:30000,
+
+            socketTimeout:60000,
+
+            tls:{
+                rejectUnauthorized:true
+            }
+
+        });
+
+
+        transporters.set(key, transporter);
+
     }
 
-    const recipient = recipients[index] ? recipients[index].trim() : "";
-    if (!recipient) continue;
 
-    res.write(': keep-alive\n\n');
+    return transporters.get(key);
 
-    try {
-      const transporter = getTransporter(email, appPassword);
-      const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+}
 
-      const mailOptions = {
-        from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
-        to: recipient,
-        subject: spunSubject,
-        headers: {
-          'X-Priority': '3',
-          'X-Mailer': 'NodeMailer',
-          'Date': new Date().toUTCString()
-        }
-      };
 
-      if (isHtml) {
-        mailOptions.html = spunBody;
-        mailOptions.text = convertHtmlToText(spunBody);
-      } else {
-        mailOptions.text = spunBody;
-      }
 
-      await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
 
-    } catch (error) {
-      console.error(`Error sending to ${recipient}:`, error.message);
-      res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
-    }
+function sleep(ms){
 
-    // SAFE HUMAN DELAY (1.5 - 2.5 Seconds)
-    // IMPORTANT: Reducing this below 1500ms will result in instant Gmail Spam flags.
-    if (index < recipients.length - 1) {
-      const safeDelay = 1500 + Math.floor(Math.random() * 1000);
-      await new Promise(resolve => setTimeout(resolve, safeDelay));
-    }
-  }
+    return new Promise(resolve=>setTimeout(resolve,ms));
 
-  res.write("data: [DONE]\n\n");
-  res.end();
+}
+
+
+
+
+function htmlToText(html=""){
+
+return html
+.replace(/<style[\s\S]*?<\/style>/gi,"")
+.replace(/<script[\s\S]*?<\/script>/gi,"")
+.replace(/<br\s*\/?>/gi,"\n")
+.replace(/<\/p>/gi,"\n\n")
+.replace(/<[^>]+>/g,"")
+.replace(/&nbsp;/g," ")
+.replace(/&amp;/g,"&")
+.trim();
+
+}
+
+
+
+
+app.post("/api/verify",async(req,res)=>{
+
+
+const {email,appPassword}=req.body;
+
+
+try{
+
+const transporter =
+getTransporter(email,appPassword);
+
+
+await transporter.verify();
+
+
+res.json({
+success:true,
+message:"SMTP verified"
 });
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
-app.post("/api/stop", (req, res) => {
-  activeSessions['global_stop'] = true;
-  res.json({ success: true, message: "Stop process registered" });
+
+}
+catch(error){
+
+console.log("VERIFY ERROR:",error.message);
+
+
+res.status(401).json({
+
+success:false,
+
+message:error.message
+
 });
 
-export default app;
+
+}
+
+
+});
+
+
+
+
+
+
+
+app.post("/api/send-stream",async(req,res)=>{
+
+
+res.setHeader("Content-Type","text/event-stream");
+res.setHeader("Cache-Control","no-cache");
+res.setHeader("Connection","keep-alive");
+
+
+
+const {
+
+email,
+
+appPassword,
+
+senderName,
+
+subject,
+
+messageBody,
+
+recipients
+
+}=req.body;
+
+
+
+if(!email || !appPassword || !Array.isArray(recipients)){
+
+
+res.write(`data:${JSON.stringify({
+
+success:false,
+
+error:"Invalid request"
+
+})}\n\n`);
+
+
+return res.end();
+
+}
+
+
+
+
+stopSending=false;
+
+
+
+const transporter =
+getTransporter(email,appPassword);
+
+
+
+for(let i=0;i<recipients.length;i++){
+
+
+
+if(stopSending){
+
+res.write(`data:${JSON.stringify({
+
+success:false,
+
+error:"Stopped"
+
+})}\n\n`);
+
+break;
+
+}
+
+
+
+const receiver =
+recipients[i].trim();
+
+
+
+if(!receiver) continue;
+
+
+
+try{
+
+
+const isHTML =
+/<[a-z][\s\S]*>/i.test(messageBody);
+
+
+
+const mail={
+
+
+from:
+senderName
+?
+`"${senderName}" <${email}>`
+:
+email,
+
+
+to:receiver,
+
+
+subject:subject
+
+
+};
+
+
+
+if(isHTML){
+
+mail.html=messageBody;
+
+mail.text=htmlToText(messageBody);
+
+}
+else{
+
+mail.text=messageBody;
+
+}
+
+
+
+
+await transporter.sendMail(mail);
+
+
+
+console.log("SENT:",receiver);
+
+
+
+res.write(`data:${JSON.stringify({
+
+success:true,
+
+recipient:receiver,
+
+count:i+1
+
+})}\n\n`);
+
+
+
+}
+
+catch(error){
+
+
+console.log("SEND ERROR:",error.message);
+
+
+
+res.write(`data:${JSON.stringify({
+
+success:false,
+
+recipient:receiver,
+
+error:error.message
+
+})}\n\n`);
+
+
+}
+
+
+
+
+
+// 500ms delay
+
+if(i < recipients.length-1){
+
+await sleep(500);
+
+}
+
+
+}
+
+
+
+res.write("data:[DONE]\n\n");
+
+res.end();
+
+
+});
+
+
+
+
+
+
+
+app.post("/api/stop",(req,res)=>{
+
+
+stopSending=true;
+
+
+res.json({
+
+success:true,
+
+message:"Stopped"
+
+});
+
+
+});
+
+
+
+
+app.listen(process.env.PORT || 3000,()=>{
+
+console.log(
+"Server running on port",
+process.env.PORT || 3000
+);
+
+});
