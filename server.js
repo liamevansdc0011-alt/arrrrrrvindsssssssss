@@ -194,8 +194,8 @@ app.post("/api/send-stream", async (req, res) => {
 
     // Dynamic delay with randomized jitter
     if (i < recipients.length - 1) {
-      const baseDelay = Math.max(3000, Number(delayMs) || 3500);
-      const jitter = Math.floor(Math.random() * 2000);
+      const baseDelay = Math.max(300, Number(delayMs) || 250);
+      const jitter = Math.floor(Math.random() * 200);
       await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
     }
   }
