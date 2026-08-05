@@ -12,7 +12,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Express Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -20,29 +19,25 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
-   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 5,
-      maxMessages: 100
+      maxConnections: 2,
+      maxMessages: 20
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -58,61 +53,15 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
-   ========================================================================== */
-function convertHtmlToText(html) {
-  if (!html) return "";
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\n\s*\n/g, '\n\n')
-    .trim();
-}
-
-/* ==========================================================================
-   AUTHENTICATION ROUTES
-   ========================================================================== */
-app.post("/api/auth", (req, res) => {
-  const { password } = req.body;
-  if (password === SITE_PASSWORD) return res.json({ success: true });
-  return res.status(401).json({ success: false, message: "Incorrect password" });
-});
-
-app.post("/api/verify", async (req, res) => {
-  const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
-
-  try {
-    const transporter = getTransporter(email, appPassword);
-    await transporter.verify();
-    return res.json({ success: true, message: "SMTP verified successfully" });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
-  }
-});
-
-/* ==========================================================================
-   SSE STREAM ROUTE (0.5 SECOND DELAY LOOP)
-   ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
 
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: "Required data missing" })}\n\n`);
     res.end();
     return;
   }
@@ -124,53 +73,41 @@ app.post("/api/send-stream", async (req, res) => {
 
   for (let index = 0; index < recipients.length; index++) {
     if (activeSessions['global_stop']) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped" })}\n\n`);
       break;
     }
 
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
-    res.write(': keep-alive\n\n');
-
     try {
       const transporter = getTransporter(email, appPassword);
-      const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Random string to make Message-ID unique
-      const randomSeed = Math.random().toString(36).substring(2, 8);
+      // Har mail ke liye dynamic content
+      let spunSubject = parseSpintax(subject);
+      let spunBody = parseSpintax(messageBody);
+
+      // Unique Identifier (Har mail ko alag dikhane ke liye)
+      const randomTag = Math.random().toString(36).substring(2, 8);
+      spunBody += `\n\n[Ref: ${randomTag}]`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         subject: spunSubject,
-        headers: {
-          'Message-ID': `<${Date.now()}.${randomSeed}@gmail.com>`,
-          'Date': new Date().toUTCString(),
-          'X-Mailer': 'Express Nodemailer Client'
-        }
+        text: spunBody
       };
-
-      if (isHtml) {
-        mailOptions.html = spunBody;
-        mailOptions.text = convertHtmlToText(spunBody);
-      } else {
-        mailOptions.text = spunBody;
-      }
 
       await transporter.sendMail(mailOptions);
       res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
 
     } catch (error) {
-      console.error(`Error sending to ${recipient}:`, error.message);
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ EXACT 0.5 SECOND DELAY (500ms)
+    // Gmail Spam Filter Bypass Delay: 1.5 Seconds
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
   }
 
@@ -178,19 +115,8 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
-app.post("/api/stop", (req, res) => {
-  activeSessions['global_stop'] = true;
-  res.json({ success: true, message: "Stop process registered" });
-});
-
-// Port listener for direct node execution (Render/Railway/Heroku/Local)
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
 export default app;
