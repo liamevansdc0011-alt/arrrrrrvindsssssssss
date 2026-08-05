@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Middleware Setup
+// Express Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -21,7 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   AUTHENTIC GMAIL TRANSPORTER
+   TRANSPORTER POOLING (TLS Socket Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -29,13 +29,11 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
+      service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 3,
-      maxMessages: 50
+      maxConnections: 5,
+      maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
   }
@@ -61,7 +59,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   PLAIN TEXT CONVERTER
+   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -103,7 +101,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   INBOX-LANDING SSE STREAM ROUTE
+   SSE STREAM ROUTE (0.5 SECOND DELAY LOOP)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -137,30 +135,21 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
-
-      // Spintax parsing
-      let spunSubject = parseSpintax(subject);
-      let spunBody = parseSpintax(messageBody);
-
-      // Random Uniqueness Generator (Force Gmail to treat every mail as unique)
-      const randomId = Math.random().toString(36).substring(2, 9);
+      const spunSubject = parseSpintax(subject);
+      const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      if (isHtml) {
-        spunBody += `<br><span style="display:none;font-size:0px;color:transparent;">Ref: ${randomId}</span>`;
-      } else {
-        spunBody += `\n\nRef: ${randomId}`;
-      }
+      // Random string to make Message-ID unique
+      const randomSeed = Math.random().toString(36).substring(2, 8);
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         subject: spunSubject,
         headers: {
-          'X-Mailer': 'Gmail Standard Webmail',
-          'X-Priority': '3',
-          'Message-ID': `<${Date.now()}.${randomId}@gmail.com>`,
-          'Date': new Date().toUTCString()
+          'Message-ID': `<${Date.now()}.${randomSeed}@gmail.com>`,
+          'Date': new Date().toUTCString(),
+          'X-Mailer': 'Express Nodemailer Client'
         }
       };
 
@@ -179,10 +168,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe 0.5s - 0.2s delay to prevent Gmail Anti-Spam Trigger
+    // ⚡ EXACT 0.5 SECOND DELAY (500ms)
     if (index < recipients.length - 1) {
-      const safeDelay = 400 + Math.floor(Math.random() * 300);
-      await new Promise(resolve => setTimeout(resolve, safeDelay));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
 
@@ -198,8 +186,11 @@ app.post("/api/stop", (req, res) => {
   res.json({ success: true, message: "Stop process registered" });
 });
 
+// Port listener for direct node execution (Render/Railway/Heroku/Local)
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
 }
 
 export default app;
