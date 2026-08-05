@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
+const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || "##";
 
 app.use(cors());
@@ -25,9 +26,9 @@ let stopSending = false;
 
 function getTransporter(email, appPassword){
 
-    const user = email.toLowerCase().trim();
+    const cleanEmail = email.toLowerCase().trim();
 
-    const key = user + "_" + appPassword;
+    const key = `${cleanEmail}_${appPassword}`;
 
 
     if(!transporters.has(key)){
@@ -42,7 +43,7 @@ function getTransporter(email, appPassword){
             secure:false,
 
             auth:{
-                user,
+                user:cleanEmail,
                 pass:appPassword
             },
 
@@ -50,7 +51,7 @@ function getTransporter(email, appPassword){
 
             maxConnections:1,
 
-            maxMessages:50,
+            maxMessages:100,
 
             connectionTimeout:30000,
 
@@ -63,7 +64,7 @@ function getTransporter(email, appPassword){
         });
 
 
-        transporters.set(key, transporter);
+        transporters.set(key,transporter);
 
     }
 
@@ -71,7 +72,6 @@ function getTransporter(email, appPassword){
     return transporters.get(key);
 
 }
-
 
 
 
@@ -83,15 +83,14 @@ function sleep(ms){
 
 
 
-
-function htmlToText(html=""){
+function convertHtmlToText(html=""){
 
 return html
 .replace(/<style[\s\S]*?<\/style>/gi,"")
 .replace(/<script[\s\S]*?<\/script>/gi,"")
 .replace(/<br\s*\/?>/gi,"\n")
 .replace(/<\/p>/gi,"\n\n")
-.replace(/<[^>]+>/g,"")
+.replace(/<[^>]*>/g,"")
 .replace(/&nbsp;/g," ")
 .replace(/&amp;/g,"&")
 .trim();
@@ -101,13 +100,45 @@ return html
 
 
 
+
+app.post("/api/auth",(req,res)=>{
+
+const {password}=req.body;
+
+
+if(password===SITE_PASSWORD){
+
+return res.json({
+success:true
+});
+
+}
+
+
+res.status(401).json({
+success:false,
+message:"Incorrect password"
+});
+
+
+});
+
+
+
+
+
+
 app.post("/api/verify",async(req,res)=>{
 
 
-const {email,appPassword}=req.body;
+const {
+email,
+appPassword
+}=req.body;
 
 
 try{
+
 
 const transporter =
 getTransporter(email,appPassword);
@@ -117,15 +148,16 @@ await transporter.verify();
 
 
 res.json({
+
 success:true,
+
 message:"SMTP verified"
+
 });
 
 
 }
 catch(error){
-
-console.log("VERIFY ERROR:",error.message);
 
 
 res.status(401).json({
@@ -151,9 +183,20 @@ message:error.message
 app.post("/api/send-stream",async(req,res)=>{
 
 
-res.setHeader("Content-Type","text/event-stream");
-res.setHeader("Cache-Control","no-cache");
-res.setHeader("Connection","keep-alive");
+res.setHeader(
+"Content-Type",
+"text/event-stream"
+);
+
+res.setHeader(
+"Cache-Control",
+"no-cache"
+);
+
+res.setHeader(
+"Connection",
+"keep-alive"
+);
 
 
 
@@ -182,7 +225,7 @@ res.write(`data:${JSON.stringify({
 
 success:false,
 
-error:"Invalid request"
+error:"Invalid data"
 
 })}\n\n`);
 
@@ -193,13 +236,17 @@ return res.end();
 
 
 
-
 stopSending=false;
 
 
 
 const transporter =
 getTransporter(email,appPassword);
+
+
+
+const senderEmail =
+email.toLowerCase().trim();
 
 
 
@@ -224,8 +271,7 @@ break;
 
 
 const receiver =
-recipients[i].trim();
-
+recipients[i]?.trim();
 
 
 if(!receiver) continue;
@@ -240,15 +286,15 @@ const isHTML =
 
 
 
-const mail={
+const mailOptions={
 
 
 from:
 senderName
 ?
-`"${senderName}" <${email}>`
+`"${senderName}" <${senderEmail}>`
 :
-email,
+senderEmail,
 
 
 to:receiver,
@@ -263,25 +309,23 @@ subject:subject
 
 if(isHTML){
 
-mail.html=messageBody;
+mailOptions.html=messageBody;
 
-mail.text=htmlToText(messageBody);
+mailOptions.text=
+convertHtmlToText(messageBody);
+
+
+}else{
+
+
+mailOptions.text=messageBody;
+
 
 }
-else{
-
-mail.text=messageBody;
-
-}
 
 
 
-
-await transporter.sendMail(mail);
-
-
-
-console.log("SENT:",receiver);
+await transporter.sendMail(mailOptions);
 
 
 
@@ -291,7 +335,7 @@ success:true,
 
 recipient:receiver,
 
-count:i+1
+index:i+1
 
 })}\n\n`);
 
@@ -302,8 +346,11 @@ count:i+1
 catch(error){
 
 
-console.log("SEND ERROR:",error.message);
-
+console.log(
+"MAIL ERROR:",
+receiver,
+error.message
+);
 
 
 res.write(`data:${JSON.stringify({
@@ -322,7 +369,6 @@ error:error.message
 
 
 
-
 // 500ms delay
 
 if(i < recipients.length-1){
@@ -330,6 +376,7 @@ if(i < recipients.length-1){
 await sleep(500);
 
 }
+
 
 
 }
@@ -369,11 +416,20 @@ message:"Stopped"
 
 
 
-app.listen(process.env.PORT || 3000,()=>{
+
+
+
+if(process.env.NODE_ENV !== "production"){
+
+app.listen(PORT,()=>{
 
 console.log(
-"Server running on port",
-process.env.PORT || 3000
+`Server running on ${PORT}`
 );
 
 });
+
+}
+
+
+export default app;
