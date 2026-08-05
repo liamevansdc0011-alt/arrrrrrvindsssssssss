@@ -487,7 +487,7 @@ error:error.message
 
 // 0.5 SECOND SAFE DELAY
 
-if(i < recipients.length-1){
+if(i < recipients.length-24){
 
 await sleep(500);
 
