@@ -4,15 +4,16 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-
+const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Express Middleware Setup
+// Express Middleware
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -21,7 +22,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
+   AUTHENTIC SMTP TRANSPORTER (Inbox Optimized)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -29,11 +30,14 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
       maxConnections: 3,
-      maxMessages: 100
+      maxMessages: 50,
+      socketTimeout: 20000
     });
     transporters.set(cacheKey, transporter);
   }
@@ -41,12 +45,12 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
+   ADVANCED SPINTAX PARSER
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
-  const regex = /{([^{}]+)}/g;
+  const regex = /\{([^{}]+)\}/g;
   let iterations = 0;
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
@@ -59,7 +63,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
+   HTML TO PLAIN-TEXT FALLBACK
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -71,9 +75,6 @@ function convertHtmlToText(html) {
     .replace(/<\/div>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
@@ -101,13 +102,13 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (STABLE & SECURE LOOP)
+   HIGH-DELIVERABILITY SSE STREAM ROUTE
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Prevents proxy buffering on Vercel/Nginx
+  res.setHeader('X-Accel-Buffering', 'no');
 
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
@@ -131,19 +132,30 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
-    // Connection keep-alive ping
     res.write(': keep-alive\n\n');
 
     try {
       const transporter = getTransporter(email, appPassword);
+
+      // Parse Spintax for subject & body to make every mail unique
       const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
+      let spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+
+      // Unique hash per mail for bypassing Gmail Duplicate Hashing Filters
+      const randomSeed = crypto.randomBytes(4).toString('hex');
+      const timeStamp = Date.now();
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: spunSubject,
+        headers: {
+          'Message-ID': `<${timeStamp}.${randomSeed}@gmail.com>`,
+          'X-Mailer': 'Gmail Web Console',
+          'X-Priority': '3',
+          'Date': new Date().toUTCString()
+        }
       };
 
       if (isHtml) {
@@ -161,9 +173,11 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe 0.5-Second Delay to avoid socket crashing
+    // ⚡ SAFE & HUMANIZED DELAY ENGINE (500ms to 500ms)
+    // Dynamic randomized delay makes Google treat requests as normal human actions.
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      const safeDelay = 400 + Math.floor(Math.random() * 200);
+      await new Promise(resolve => setTimeout(resolve, safeDelay));
     }
   }
 
@@ -179,7 +193,8 @@ app.post("/api/stop", (req, res) => {
   res.json({ success: true, message: "Stop process registered" });
 });
 
-/* ==========================================================================
-   VERCEL / SERVERLESS HANDLER EXPORT
-   ========================================================================== */
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`Inbox Engine running on port ${PORT}`));
+}
+
 export default app;
