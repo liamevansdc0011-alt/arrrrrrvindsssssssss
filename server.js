@@ -228,7 +228,7 @@ app.post("/api/send-stream", async (req, res) => {
 
     // ORGANIC HUMAN DELAY: 0.3s to 0.2s (Random Jitter to trick Gmail Spam Filters)
     if (index < recipients.length - 1) {
-      const totalWaitTime = Math.floor(4000 + Math.random() * 4000); // 1 - 2 seconds
+      const totalWaitTime = Math.floor(300 + Math.random() * 300); // 0.1 - 0.2 seconds
       const pingInterval = 1500;
       let elapsedTime = 0;
 
