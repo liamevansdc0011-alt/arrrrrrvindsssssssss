@@ -4,17 +4,15 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
-
-// Express Middleware Setup
+// Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -23,38 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   ROOT ROUTE
-   ========================================================================== */
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-/* ==========================================================================
-   HELPER: CLOUDFLARE TURNSTILE VERIFICATION
-   ========================================================================== */
-async function verifyTurnstile(token, ip) {
-  if (!TURNSTILE_SECRET_KEY) return true;
-
-  try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret: TURNSTILE_SECRET_KEY,
-        response: token,
-        remoteip: ip
-      })
-    });
-    const data = await response.json();
-    return data.success;
-  } catch (error) {
-    console.error("Turnstile Verification Error:", error);
-    return false;
-  }
-}
-
-/* ==========================================================================
-   TRANSPORTER POOLING (High Throughput Pool)
+   TRANSPORTER POOLING (Fast Socket Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -64,9 +31,10 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 5,
-      maxMessages: 100
+      pool: true,             // Connection pooling for fast execution
+      maxConnections: 10,     // Increased connections for faster throughput
+      maxMessages: 200,
+      rateLimit: 20           // Fast message rate
     });
     transporters.set(cacheKey, transporter);
   }
@@ -92,7 +60,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   PLAIN-TEXT FALLBACK
+   HTML TO PLAIN-TEXT FALLBACK (Improves Inbox Rate)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -116,24 +84,13 @@ function convertHtmlToText(html) {
    ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (!password) return res.status(400).json({ success: false, message: "Password is required" });
-  if (password === SITE_PASSWORD) return res.json({ success: true, message: "Access granted" });
+  if (password === SITE_PASSWORD) return res.json({ success: true });
   return res.status(401).json({ success: false, message: "Incorrect password" });
 });
 
 app.post("/api/verify", async (req, res) => {
-  const { email, appPassword, cfToken } = req.body;
-
-  if (!email || !appPassword) {
-    return res.status(400).json({ success: false, message: "Email and App Password required" });
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      return res.status(400).json({ success: false, message: "Security check failed." });
-    }
-  }
+  const { email, appPassword } = req.body;
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
 
   try {
     const transporter = getTransporter(email, appPassword);
@@ -145,7 +102,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (DYNAMIC SPEED CONTROL)
+   SSE STREAM ROUTE (INBOX OPTIMIZED & HIGH SPEED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -153,21 +110,12 @@ app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, delayMs = 50 } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
     res.end();
     return;
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Turnstile verification failed" })}\n\n`);
-      res.end();
-      return;
-    }
   }
 
   const senderEmail = email.toLowerCase().trim();
@@ -192,17 +140,19 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
+      // Unique Message-ID generation for anti-spam filtering
       const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
+      const customMessageId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
-        replyTo: senderEmail,
         to: recipient,
         subject: spunSubject,
         headers: {
-          'Message-ID': uniqueMsgId,
-          'X-Mailer': 'Nodemailer Express Engine',
+          'X-Mailer': 'NodeMailer Bulk Sender',
+          'X-Priority': '3', // Normal Priority
+          'Message-ID': customMessageId,
+          'Date': new Date().toUTCString(),
           'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
         }
       };
@@ -222,10 +172,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // SPEED CONTROL: 50ms (0.05 second) custom delay
+    // ⚡ FAST DELAY: 0.05 seconds (50 milliseconds)
     if (index < recipients.length - 1) {
-      const waitTime = Number(delayMs) >= 0 ? Number(delayMs) : 50;
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
@@ -240,5 +189,9 @@ app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
 });
+
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
 
 export default app;
