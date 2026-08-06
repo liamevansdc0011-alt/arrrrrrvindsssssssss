@@ -173,9 +173,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ SAFE DELAY (1.5s - 2.2s Gap for better deliverability)
+    // ⚡ INBOX SAFE DELAY (1.s - 2.s Dynamic Gap)
     if (index < recipients.length - 1) {
-      const safeDelay = 1500 + Math.floor(Math.random() * 700);
+      const safeDelay = 500 + Math.floor(Math.random() * 300);
       await new Promise(resolve => setTimeout(resolve, safeDelay));
     }
   }
