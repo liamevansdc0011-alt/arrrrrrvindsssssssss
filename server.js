@@ -54,7 +54,7 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER POOLING (Optimized for High Inbox Rate)
+   TRANSPORTER POOLING (High Throughput Pool)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -65,10 +65,8 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // High connection count triggers Gmail spam score
-      maxMessages: 30,
-      rateDelta: 1000,
-      rateLimit: 1
+      maxConnections: 5,
+      maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
   }
@@ -94,7 +92,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   CLEAN PLAIN-TEXT FALLBACK (Dual Multipart MIME Support)
+   PLAIN-TEXT FALLBACK
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -147,7 +145,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (SAFE HUMAN PACING + INBOX ENHANCED HEADERS)
+   SSE STREAM ROUTE (DYNAMIC SPEED CONTROL)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -155,7 +153,7 @@ app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, delayMs = 50 } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
@@ -186,7 +184,6 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
-    // Send HTTP keep-alive ping
     res.write(': keep-alive\n\n');
 
     try {
@@ -195,9 +192,8 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Authenticated Unique Message-ID Header (Crucial for Inboxing)
       const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(6).toString('hex')}@${domain}>`;
+      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
@@ -206,7 +202,7 @@ app.post("/api/send-stream", async (req, res) => {
         subject: spunSubject,
         headers: {
           'Message-ID': uniqueMsgId,
-          'X-Mailer': 'Organic Enterprise Mailer',
+          'X-Mailer': 'Nodemailer Express Engine',
           'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`
         }
       };
@@ -226,18 +222,10 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ORGANIC HUMAN DELAY: 0.3s to 0.2s (Random Jitter to trick Gmail Spam Filters)
+    // SPEED CONTROL: 50ms (0.05 second) custom delay
     if (index < recipients.length - 1) {
-      const totalWaitTime = Math.floor(300 + Math.random() * 300); // 0.1 - 0.2 seconds
-      const pingInterval = 1500;
-      let elapsedTime = 0;
-
-      while (elapsedTime < totalWaitTime) {
-        const timeToSleep = Math.min(pingInterval, totalWaitTime - elapsedTime);
-        await new Promise(resolve => setTimeout(resolve, timeToSleep));
-        elapsedTime += timeToSleep;
-        res.write(': keep-alive\n\n');
-      }
+      const waitTime = Number(delayMs) >= 0 ? Number(delayMs) : 50;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
 
@@ -253,7 +241,4 @@ app.post("/api/stop", (req, res) => {
   res.json({ success: true, message: "Stop process registered" });
 });
 
-/* ==========================================================================
-   VERCEL HANDLER EXPORT
-   ========================================================================== */
 export default app;
