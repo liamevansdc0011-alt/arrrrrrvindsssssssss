@@ -170,9 +170,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR DELAY: 1.0s to 1.0s Random Wait to avoid Gmail Spam Filter
+    // HUMAN BEHAVIOR DELAY: 4.0s to 7.0s Random Wait to avoid Gmail Spam Filter
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(400 + Math.random() * 300);
+      const waitTime = Math.floor(4000 + Math.random() * 3000);
       let elapsedTime = 0;
       const interval = 1000;
 
