@@ -19,9 +19,7 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* ==========================================================================
-   TRANSPORTER POOLING (Rate-Limited Connection for High Deliverability)
-   ========================================================================== */
+/* TRANSPORTER POOLING */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -31,17 +29,15 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // Single connection to mimic real user behavior
-      maxMessages: 20
+      maxConnections: 1, // Single socket connection only
+      maxMessages: 10
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
+/* SPINTAX PARSER ({Hi|Hello|Hey}) */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -57,9 +53,7 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
-   ========================================================================== */
+/* CLEAN HTML TO PLAIN-TEXT CONVERTER */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -77,9 +71,7 @@ function convertHtmlToText(html) {
     .trim();
 }
 
-/* ==========================================================================
-   AUTHENTICATION ROUTES
-   ========================================================================== */
+/* AUTHENTICATION ROUTES */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
@@ -99,9 +91,7 @@ app.post("/api/verify", async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   SSE STREAM ROUTE (INBOX OPTIMIZED ENGINE)
-   ========================================================================== */
+/* SSE STREAM ROUTE */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -138,7 +128,7 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Generating RFC Compliant Dynamic Message-ID
+      // Clean Standard Message-ID
       const domain = senderEmail.split('@')[1] || 'gmail.com';
       const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
 
@@ -148,10 +138,7 @@ app.post("/api/send-stream", async (req, res) => {
         to: recipient,
         subject: spunSubject,
         headers: {
-          'Message-ID': uniqueMsgId,
-          'X-Mailer': 'Outlook Express 16.0.4266',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
-          'Feedback-ID': `bulk-engine:${senderEmail}:inbox`
+          'Message-ID': uniqueMsgId
         }
       };
 
@@ -170,14 +157,13 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR DELAY: 4.0s to 7.0s Random Wait to avoid Gmail Spam Filter
+    // HIGH DELAY: 8 to 15 Seconds Delay per Email to Avoid Detection
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(4000 + Math.random() * 3000);
+      const waitTime = Math.floor(8000 + Math.random() * 7000);
       let elapsedTime = 0;
-      const interval = 1000;
 
       while (elapsedTime < waitTime) {
-        const sleepStep = Math.min(interval, waitTime - elapsedTime);
+        const sleepStep = Math.min(1000, waitTime - elapsedTime);
         await new Promise(resolve => setTimeout(resolve, sleepStep));
         elapsedTime += sleepStep;
         res.write(': keep-alive\n\n');
@@ -189,9 +175,7 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
+/* STOP ROUTE */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
