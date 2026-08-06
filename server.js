@@ -157,9 +157,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HIGH DELAY: 8 to 15 Seconds Delay per Email to Avoid Detection
+    // HIGH DELAY: 1 to 2 Seconds Delay per Email to Avoid Detection
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(8000 + Math.random() * 7000);
+      const waitTime = Math.floor(2500 + Math.random() * 2000);
       let elapsedTime = 0;
 
       while (elapsedTime < waitTime) {
