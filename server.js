@@ -10,8 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -20,31 +19,9 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-async function verifyTurnstile(token, ip) {
-  if (!TURNSTILE_SECRET_KEY) return true;
-  try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret: TURNSTILE_SECRET_KEY,
-        response: token,
-        remoteip: ip
-      })
-    });
-    const data = await response.json();
-    return data.success;
-  } catch (error) {
-    console.error("Turnstile Error:", error);
-    return false;
-  }
-}
-
-/* TRANSPORTER POOLING (1 Single Connection to prevent SMTP flag) */
+/* ==========================================================================
+   TRANSPORTER POOLING (Rate-Limited Connection for High Deliverability)
+   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -54,7 +31,7 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1,
+      maxConnections: 1, // Single connection to mimic real user behavior
       maxMessages: 20
     });
     transporters.set(cacheKey, transporter);
@@ -62,7 +39,9 @@ function getTransporter(email, appPassword) {
   return transporters.get(cacheKey);
 }
 
-/* SPINTAX PARSER */
+/* ==========================================================================
+   SPINTAX PARSER ({Hi|Hello|Hey})
+   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -78,7 +57,9 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* HTML TO TEXT CONVERTER */
+/* ==========================================================================
+   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
+   ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -96,26 +77,18 @@ function convertHtmlToText(html) {
     .trim();
 }
 
+/* ==========================================================================
+   AUTHENTICATION ROUTES
+   ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (!password) return res.status(400).json({ success: false, message: "Password is required" });
-  if (password === SITE_PASSWORD) return res.json({ success: true, message: "Access granted" });
+  if (password === SITE_PASSWORD) return res.json({ success: true });
   return res.status(401).json({ success: false, message: "Incorrect password" });
 });
 
 app.post("/api/verify", async (req, res) => {
-  const { email, appPassword, cfToken } = req.body;
-
-  if (!email || !appPassword) {
-    return res.status(400).json({ success: false, message: "Email and App Password required" });
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      return res.status(400).json({ success: false, message: "Security check failed." });
-    }
-  }
+  const { email, appPassword } = req.body;
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
 
   try {
     const transporter = getTransporter(email, appPassword);
@@ -126,28 +99,21 @@ app.post("/api/verify", async (req, res) => {
   }
 });
 
-/* INBOX-OPTIMIZED SSE STREAM ROUTE */
+/* ==========================================================================
+   SSE STREAM ROUTE (INBOX OPTIMIZED ENGINE)
+   ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
     res.end();
     return;
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Turnstile verification failed" })}\n\n`);
-      res.end();
-      return;
-    }
   }
 
   const senderEmail = email.toLowerCase().trim();
@@ -172,9 +138,9 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // RFC Standard Compliant Dynamic Message-ID
+      // Generating RFC Compliant Dynamic Message-ID
       const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(5).toString('hex')}@${domain}>`;
+      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
@@ -183,9 +149,9 @@ app.post("/api/send-stream", async (req, res) => {
         subject: spunSubject,
         headers: {
           'Message-ID': uniqueMsgId,
-          'X-Mailer': 'Apple Mail (2.3654.120.8)',
+          'X-Mailer': 'Outlook Express 16.0.4266',
           'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
-          'Feedback-ID': `bulk-mail:${senderEmail}:inbox`
+          'Feedback-ID': `bulk-engine:${senderEmail}:inbox`
         }
       };
 
@@ -204,16 +170,16 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // SAFE RANDOM DELAY (0.5s to 0.3s per email)
+    // HUMAN BEHAVIOR DELAY: 1.0s to 1.0s Random Wait to avoid Gmail Spam Filter
     if (index < recipients.length - 1) {
-      const totalWaitTime = Math.floor(350 + Math.random() * 350);
-      const pingInterval = 1000;
+      const waitTime = Math.floor(400 + Math.random() * 300);
       let elapsedTime = 0;
+      const interval = 1000;
 
-      while (elapsedTime < totalWaitTime) {
-        const timeToSleep = Math.min(pingInterval, totalWaitTime - elapsedTime);
-        await new Promise(resolve => setTimeout(resolve, timeToSleep));
-        elapsedTime += timeToSleep;
+      while (elapsedTime < waitTime) {
+        const sleepStep = Math.min(interval, waitTime - elapsedTime);
+        await new Promise(resolve => setTimeout(resolve, sleepStep));
+        elapsedTime += sleepStep;
         res.write(': keep-alive\n\n');
       }
     }
@@ -223,6 +189,9 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
+/* ==========================================================================
+   STOP ROUTE
+   ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
