@@ -10,44 +10,49 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
+const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 
-// Middleware Setup
+// State Tracker
+const globalSession = { isStopped: false };
+const transporterPool = new Map();
+
+// Middlewares
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const activeSessions = {};
-const transporters = new Map();
-
 /* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
+   HELPER FUNCTIONS
    ========================================================================== */
+
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
+  const poolKey = `${cleanEmail}_${appPassword}`;
 
-  if (!transporters.has(cacheKey)) {
+  if (!transporterPool.has(poolKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword },
+      service: 'gmail',
+      auth: {
+        user: cleanEmail,
+        pass: appPassword
+      },
       pool: true,
-      maxConnections: 3,
-      maxMessages: 100
+      maxConnections: 2,
+      maxMessages: 100,
+      socketTimeout: 25000
     });
-    transporters.set(cacheKey, transporter);
+    transporterPool.set(poolKey, transporter);
   }
-  return transporters.get(cacheKey);
+
+  return transporterPool.get(poolKey);
 }
 
-/* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
   const regex = /{([^{}]+)}/g;
   let iterations = 0;
+  
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
       const options = choices.split('|');
@@ -58,10 +63,7 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK
-   ========================================================================== */
-function convertHtmlToText(html) {
+function stripHtmlToPlain(html) {
   if (!html) return "";
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -79,31 +81,37 @@ function convertHtmlToText(html) {
 }
 
 /* ==========================================================================
-   AUTHENTICATION ROUTES
+   ROUTES
    ========================================================================== */
-app.post("/api/auth", (req, res) => {
-  const { password } = req.body;
-  if (password === SITE_PASSWORD) return res.json({ success: true });
-  return res.status(401).json({ success: false, message: "Incorrect password" });
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.post("/api/verify", async (req, res) => {
+app.post('/api/auth', (req, res) => {
+  const { password } = req.body;
+  if (password === SITE_PASSWORD) {
+    return res.json({ success: true, message: "Authorized" });
+  }
+  return res.status(401).json({ success: false, message: "Unauthorized password" });
+});
+
+app.post('/api/verify', async (req, res) => {
   const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
+  if (!email || !appPassword) {
+    return res.status(400).json({ success: false, message: "Email and App Password required" });
+  }
 
   try {
     const transporter = getTransporter(email, appPassword);
     await transporter.verify();
-    return res.json({ success: true, message: "SMTP verified successfully" });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
+    return res.json({ success: true, message: "SMTP credentials verified" });
+  } catch (err) {
+    return res.status(401).json({ success: false, message: "SMTP Connection failed" });
   }
 });
 
-/* ==========================================================================
-   SSE STREAM ROUTE
-   ========================================================================== */
-app.post("/api/send-stream", async (req, res) => {
+app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -112,29 +120,31 @@ app.post("/api/send-stream", async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: "Invalid payload parameters" })}\n\n`);
     res.end();
     return;
   }
 
   const senderEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
+  globalSession.isStopped = false;
 
-  activeSessions['global_stop'] = false;
+  const heartbeat = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 10000);
 
-  for (let index = 0; index < recipients.length; index++) {
-    if (activeSessions['global_stop']) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
+  for (let i = 0; i < recipients.length; i++) {
+    if (globalSession.isStopped) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Process stopped by user" })}\n\n`);
       break;
     }
 
-    const recipient = recipients[index] ? recipients[index].trim() : "";
+    const recipient = recipients[i] ? recipients[i].trim() : "";
     if (!recipient) continue;
-
-    res.write(': keep-alive\n\n');
 
     try {
       const transporter = getTransporter(email, appPassword);
+      
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
@@ -142,12 +152,17 @@ app.post("/api/send-stream", async (req, res) => {
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        replyTo: senderEmail,
+        subject: spunSubject,
+        headers: {
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+        }
       };
 
       if (isHtml) {
         mailOptions.html = spunBody;
-        mailOptions.text = convertHtmlToText(spunBody);
+        mailOptions.text = stripHtmlToPlain(spunBody);
       } else {
         mailOptions.text = spunBody;
       }
@@ -160,25 +175,30 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
+    // SAFE & FAST DELAY ENGINE
+    if (i < recipients.length - 1) {
+      // 0.3 से 0.5 सेकंड का फ़ास्ट लेकिन सेफ़ डिले
+      let delay = Math.floor(300 + Math.random() * 200); 
+
+      // हर 15 मेल के बाद 15 सेकंड का छोटा ब्रेक (Spam Detection रोकने के लिए)
+      if ((i + 1) % 15 === 0) {
+        delay += 15000;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 
+  clearInterval(heartbeat);
   res.write("data: [DONE]\n\n");
   res.end();
 });
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
-app.post("/api/stop", (req, res) => {
-  activeSessions['global_stop'] = true;
-  res.json({ success: true, message: "Stop process registered" });
+app.post('/api/stop', (req, res) => {
+  globalSession.isStopped = true;
+  res.json({ success: true, message: "Stop signal received" });
 });
 
-if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
-
-export default app;
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
