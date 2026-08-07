@@ -9,7 +9,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
+
+const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -17,6 +19,30 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const activeSessions = {};
 const transporters = new Map();
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+async function verifyTurnstile(token, ip) {
+  if (!TURNSTILE_SECRET_KEY) return true;
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        secret: TURNSTILE_SECRET_KEY,
+        response: token,
+        remoteip: ip
+      })
+    });
+    const data = await response.json();
+    return data.success;
+  } catch (error) {
+    console.error("Turnstile Error:", error);
+    return false;
+  }
+}
 
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -30,7 +56,7 @@ function getTransporter(email, appPassword) {
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
       maxConnections: 1,
-      maxMessages: 10
+      maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
   }
@@ -62,18 +88,28 @@ function convertHtmlToText(html) {
     .replace(/<\/div>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (password === SITE_PASSWORD) return res.json({ success: true });
+  if (!password) return res.status(400).json({ success: false, message: "Password is required" });
+  if (password === SITE_PASSWORD) return res.json({ success: true, message: "Access granted" });
   return res.status(401).json({ success: false, message: "Incorrect password" });
 });
 
 app.post("/api/verify", async (req, res) => {
-  const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
+  const { email, appPassword, cfToken } = req.body;
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Email and App Password required" });
+
+  if (cfToken && TURNSTILE_SECRET_KEY) {
+    const isValidToken = await verifyTurnstile(cfToken, req.ip);
+    if (!isValidToken) return res.status(400).json({ success: false, message: "Security check failed." });
+  }
 
   try {
     const transporter = getTransporter(email, appPassword);
@@ -90,12 +126,21 @@ app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
     res.end();
     return;
+  }
+
+  if (cfToken && TURNSTILE_SECRET_KEY) {
+    const isValidToken = await verifyTurnstile(cfToken, req.ip);
+    if (!isValidToken) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Turnstile failed" })}\n\n`);
+      res.end();
+      return;
+    }
   }
 
   const senderEmail = email.toLowerCase().trim();
@@ -141,7 +186,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Fixed 1-Second Delay
+    // FIXED EXACT 2-SECOND DELAY
     if (index < recipients.length - 1) {
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
