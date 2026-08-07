@@ -1,15 +1,31 @@
 {
-  "name": "bulk-email-sender",
-  "version": "1.0.0",
+  "name": "email-sender",
+  "version": "2.0.0",
+  "description": "Secure SMTP Email Sender using Express and Nodemailer",
+  "private": true,
   "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
+  "engines": {
+    "node": ">=18.18.0"
   },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
+  },
+  "keywords": [
+    "smtp",
+    "email",
+    "nodemailer",
+    "express",
+    "gmail"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.21.2",
     "nodemailer": "^6.9.13"
   }
 }
