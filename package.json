@@ -1,31 +1,20 @@
 {
-  "name": "email-sender",
-  "version": "2.0.0",
-  "description": "Secure SMTP Email Sender using Express and Nodemailer",
+  "name": "secure-mail-console",
   "private": true,
+  "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
-  "engines": {
-    "node": ">=18.18.0"
-  },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js"
+    "dev": "node server.js",
+    "start": "node server.js"
   },
-  "keywords": [
-    "smtp",
-    "email",
-    "nodemailer",
-    "express",
-    "gmail"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "nodemailer": "^6.9.13"
+  "dependencies": {a
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^6.31.2",
+    "nodemailer": "^9.0.3"a
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.16.0"
   }
 }
