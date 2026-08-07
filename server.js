@@ -205,7 +205,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR SIMULATION DELAY (1.s - 1.s)
+    // HUMAN BEHAVIOR SIMULATION DELAY (1.8s - 3.2s)
     // Dynamic delay keeps sending speed natural to pass Google AI checks
     if (index < recipients.length - 1) {
       const dynamicDelay = 400 + Math.floor(Math.random() * 300);
