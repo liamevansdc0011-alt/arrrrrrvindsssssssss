@@ -3,16 +3,17 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
-
+// Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -20,42 +21,37 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+/* ==========================================================================
+   1. UNIQUE REFERENCE CODE & HASH GENERATOR (Anti-Spam Fingerprint)
+   ========================================================================== */
+function generateReferenceData() {
+  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const timeStamp = Date.now().toString().slice(-4);
+  
+  // Example Ref Code: REF-8F3A-9201
+  const refCode = `REF-${randomHex}-${timeStamp}`;
+  
+  // Invisible Hash to break duplicate content hashing by Gmail AI
+  const invisibleHash = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">
+    [RefID: ${crypto.randomBytes(8).toString('hex')}]
+  </div>`;
 
-async function verifyTurnstile(token, ip) {
-  if (!TURNSTILE_SECRET_KEY) return true;
-  try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret: TURNSTILE_SECRET_KEY,
-        response: token,
-        remoteip: ip
-      })
-    });
-    const data = await response.json();
-    return data.success;
-  } catch (error) {
-    console.error("Turnstile Error:", error);
-    return false;
-  }
+  return { refCode, invisibleHash };
 }
 
+/* ==========================================================================
+   2. TRANSPORTER POOLING
+   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
+      service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1,
+      maxConnections: 1, // Single connection to avoid rapid socket bans
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -63,10 +59,13 @@ function getTransporter(email, appPassword) {
   return transporters.get(cacheKey);
 }
 
+/* ==========================================================================
+   3. SPINTAX PARSER ({Hi|Hello|Hey})
+   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
-  const regex = /{([^{}]+)}/g;
+  const regex = /\{([^{}]+)\}/g;
   let iterations = 0;
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
@@ -78,6 +77,9 @@ function parseSpintax(text) {
   return spun;
 }
 
+/* ==========================================================================
+   4. HTML TO PLAIN-TEXT CONVERTER
+   ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -89,58 +91,47 @@ function convertHtmlToText(html) {
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
+/* ==========================================================================
+   5. AUTHENTICATION ROUTES
+   ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (!password) return res.status(400).json({ success: false, message: "Password is required" });
-  if (password === SITE_PASSWORD) return res.json({ success: true, message: "Access granted" });
+  if (password === SITE_PASSWORD) return res.json({ success: true });
   return res.status(401).json({ success: false, message: "Incorrect password" });
 });
 
 app.post("/api/verify", async (req, res) => {
-  const { email, appPassword, cfToken } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Email and App Password required" });
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) return res.status(400).json({ success: false, message: "Security check failed." });
-  }
+  const { email, appPassword } = req.body;
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
 
   try {
     const transporter = getTransporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed." });
+    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
   }
 });
 
+/* ==========================================================================
+   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE
+   ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
     res.end();
     return;
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Turnstile failed" })}\n\n`);
-      res.end();
-      return;
-    }
   }
 
   const senderEmail = email.toLowerCase().trim();
@@ -161,34 +152,64 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
+      
+      // Generate Unique Reference ID for this specific mail
+      const { refCode, invisibleHash } = generateReferenceData();
+
       const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
+      let spunBody = parseSpintax(messageBody);
+
+      // Append Reference Code Footer to Mail Body
+      const referenceFooterHtml = `
+        <br/><br/>
+        <hr style="border:none;border-top:1px solid #e0e0e0;margin:20px 0;"/>
+        <p style="font-size:11px;color:#888888;font-family:sans-serif;margin:0;">
+          Reference Code: <strong>${refCode}</strong> | Sent via Secure Mail Protocol
+        </p>
+        ${invisibleHash}
+      `;
+
+      const referenceFooterText = `\n\n---\nReference Code: ${refCode}`;
+
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+
+      // Unique Message ID generation for email standards compliance
+      const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
+      const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: `${spunSubject} [#${refCode.slice(-8)}]`, // Unique subject suffix
+        messageId: customMessageId,
+        headers: {
+          'X-Entity-Ref-ID': refCode,
+          'X-Auto-Response-Suppress': 'OOF, AutoReply',
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe%20${refCode}>`,
+          'Date': new Date().toUTCString()
+        }
       };
 
       if (isHtml) {
-        mailOptions.html = spunBody;
-        mailOptions.text = convertHtmlToText(spunBody);
+        mailOptions.html = spunBody + referenceFooterHtml;
+        mailOptions.text = convertHtmlToText(spunBody) + referenceFooterText;
       } else {
-        mailOptions.text = spunBody;
+        mailOptions.text = spunBody + referenceFooterText;
       }
 
       await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
+      res.write(`data: ${JSON.stringify({ success: true, recipient, refCode })}\n\n`);
 
     } catch (error) {
       console.error(`Error sending to ${recipient}:`, error.message);
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // FIXED EXACT 2-SECOND DELAY
+    // HUMAN BEHAVIOR SIMULATION DELAY (1.s - 1.s)
+    // Dynamic delay keeps sending speed natural to pass Google AI checks
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      const dynamicDelay = 400 + Math.floor(Math.random() * 300);
+      await new Promise(resolve => setTimeout(resolve, dynamicDelay));
     }
   }
 
@@ -196,9 +217,16 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
+/* ==========================================================================
+   7. STOP ROUTE
+   ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 export default app;
