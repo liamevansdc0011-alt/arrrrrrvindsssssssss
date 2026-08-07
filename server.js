@@ -18,7 +18,7 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* Direct SSL Transporter (Fixes Throttling & Fake Signature Flags) */
+/* Direct SSL Transporter */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -27,18 +27,18 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
-      secure: true, // Direct SSL Connection
+      secure: true,
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
       maxConnections: 1,
-      maxMessages: 15
+      maxMessages: 10
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* SPINTAX PARSER ({Hi|Hello|Hey}) */
+/* SPINTAX PARSER */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -95,7 +95,7 @@ app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients, unsubscribeUrl } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
@@ -125,11 +125,15 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Clean Standard Options (Gmail manages its own Message-ID natively)
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        replyTo: senderEmail,
+        subject: spunSubject,
+        headers: {
+          'X-Mailer': 'NodeMailer',
+          'List-Unsubscribe': unsubscribeUrl ? `<${unsubscribeUrl}>` : `<mailto:${senderEmail}?subject=unsubscribe>`
+        }
       };
 
       if (isHtml) {
@@ -147,9 +151,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Dynamic Human-like Delay (2.0s - 3.0s)
+    // Safe Delay (2.0s - 3.0s) to prevent spam detection
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(600 + Math.random() * 500);
+      const waitTime = Math.floor(1500 + Math.random() * 1500);
       let elapsedTime = 0;
       while (elapsedTime < waitTime) {
         const sleepStep = Math.min(1000, waitTime - elapsedTime);
