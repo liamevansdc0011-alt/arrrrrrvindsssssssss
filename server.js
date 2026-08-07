@@ -10,10 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
 
-// Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -21,9 +19,6 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* ==========================================================================
-   OPTIMIZED SMTP TRANSPORTER (Connection Reuse)
-   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -35,22 +30,18 @@ function getTransporter(email, appPassword) {
       secure: true,
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 5,
-      maxMessages: 100,
-      socketTimeout: 20000
+      maxConnections: 1,
+      maxMessages: 15
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* ==========================================================================
-   ADVANCED SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
-  const regex = /\{([^{}]+)\}/g;
+  const regex = /{([^{}]+)}/g;
   let iterations = 0;
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
@@ -62,9 +53,6 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* ==========================================================================
-   HTML TO PLAIN TEXT CONVERTER (Dual MIME Support)
-   ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -75,13 +63,9 @@ function convertHtmlToText(html) {
     .replace(/<\/div>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
-/* ==========================================================================
-   AUTHENTICATION ROUTES
-   ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
@@ -97,13 +81,10 @@ app.post("/api/verify", async (req, res) => {
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
+    return res.status(401).json({ success: false, message: "Authentication failed." });
   }
 });
 
-/* ==========================================================================
-   HIGH-DELIVERABILITY SSE STREAM ROUTE
-   ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -136,26 +117,19 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
-
-      // Parse Spintax
       const spunSubject = parseSpintax(subject);
-      let spunBody = parseSpintax(messageBody);
+      const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Dynamic unique headers per message
-      const randomSeed = crypto.randomBytes(4).toString('hex');
-      const timeStamp = Date.now();
+      const domain = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
+        replyTo: senderEmail,
         to: recipient,
         subject: spunSubject,
-        headers: {
-          'Message-ID': `<${timeStamp}.${randomSeed}@gmail.com>`,
-          'X-Mailer': 'Gmail Web UI',
-          'X-Priority': '3',
-          'Date': new Date().toUTCString()
-        }
+        headers: { 'Message-ID': uniqueMsgId }
       };
 
       if (isHtml) {
@@ -173,10 +147,16 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ⚡ INBOX SAFE DELAY (1.s - 2.s Dynamic Gap)
+    // Dynamic Anti-Spam Delay (3.0s - 6.0s)
     if (index < recipients.length - 1) {
-      const safeDelay = 500 + Math.floor(Math.random() * 300);
-      await new Promise(resolve => setTimeout(resolve, safeDelay));
+      const waitTime = Math.floor(3000 + Math.random() * 3000);
+      let elapsedTime = 0;
+      while (elapsedTime < waitTime) {
+        const sleepStep = Math.min(1000, waitTime - elapsedTime);
+        await new Promise(resolve => setTimeout(resolve, sleepStep));
+        elapsedTime += sleepStep;
+        res.write(': keep-alive\n\n');
+      }
     }
   }
 
@@ -184,16 +164,9 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
 });
-
-if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => console.log(`Engine running on port ${PORT}`));
-}
 
 export default app;
