@@ -7,11 +7,11 @@
     "dev": "node server.js",
     "start": "node server.js"
   },
-  "dependencies": {a
+  "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
-    "nodemailer": "^8.0.3"a
+    "nodemailer": "^8.0.3"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
