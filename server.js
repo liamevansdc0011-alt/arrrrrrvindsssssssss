@@ -188,7 +188,7 @@ app.post("/api/send-stream", async (req, res) => {
 
     // FIXED EXACT 2-SECOND DELAY
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
   }
 
