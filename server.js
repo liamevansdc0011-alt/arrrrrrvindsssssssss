@@ -4,7 +4,6 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +18,7 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
+/* Direct SSL Transporter (Fixes Throttling & Fake Signature Flags) */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -27,7 +27,7 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
-      secure: true,
+      secure: true, // Direct SSL Connection
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
       maxConnections: 1,
@@ -38,6 +38,7 @@ function getTransporter(email, appPassword) {
   return transporters.get(cacheKey);
 }
 
+/* SPINTAX PARSER ({Hi|Hello|Hey}) */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -53,6 +54,7 @@ function parseSpintax(text) {
   return spun;
 }
 
+/* CLEAN HTML TO TEXT CONVERTER */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -66,6 +68,7 @@ function convertHtmlToText(html) {
     .trim();
 }
 
+/* AUTHENTICATION ROUTES */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
@@ -81,10 +84,11 @@ app.post("/api/verify", async (req, res) => {
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed." });
+    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
   }
 });
 
+/* SSE STREAM ROUTE */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -121,15 +125,11 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      const domain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domain}>`;
-
+      // Clean Standard Options (Gmail manages its own Message-ID natively)
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
-        replyTo: senderEmail,
         to: recipient,
-        subject: spunSubject,
-        headers: { 'Message-ID': uniqueMsgId }
+        subject: spunSubject
       };
 
       if (isHtml) {
@@ -147,9 +147,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Dynamic Anti-Spam Delay (3.0s - 6.0s)
+    // Dynamic Human-like Delay (2.0s - 3.0s)
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(3000 + Math.random() * 3000);
+      const waitTime = Math.floor(600 + Math.random() * 500);
       let elapsedTime = 0;
       while (elapsedTime < waitTime) {
         const sleepStep = Math.min(1000, waitTime - elapsedTime);
@@ -164,6 +164,7 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
+/* STOP ROUTE */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
