@@ -18,7 +18,6 @@ app.use(express.static(path.join(__dirname, "public")));
 const activeSessions = {};
 const transporters = new Map();
 
-/* Direct SSL Transporter */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cacheKey = `${cleanEmail}_${appPassword}`;
@@ -31,14 +30,14 @@ function getTransporter(email, appPassword) {
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
       maxConnections: 1,
-      maxMessages: 10
+      maxMessages: 5, // Reduced to avoid aggressive socket flags
+      rateLimit: 1    // Max 1 message per connection refresh
     });
     transporters.set(cacheKey, transporter);
   }
   return transporters.get(cacheKey);
 }
 
-/* SPINTAX PARSER */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
@@ -54,7 +53,6 @@ function parseSpintax(text) {
   return spun;
 }
 
-/* CLEAN HTML TO TEXT CONVERTER */
 function convertHtmlToText(html) {
   if (!html) return "";
   return html
@@ -68,7 +66,6 @@ function convertHtmlToText(html) {
     .trim();
 }
 
-/* AUTHENTICATION ROUTES */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) return res.json({ success: true });
@@ -84,11 +81,10 @@ app.post("/api/verify", async (req, res) => {
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
+    return res.status(401).json({ success: false, message: "Authentication failed." });
   }
 });
 
-/* SSE STREAM ROUTE */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -131,8 +127,8 @@ app.post("/api/send-stream", async (req, res) => {
         replyTo: senderEmail,
         subject: spunSubject,
         headers: {
-          'X-Mailer': 'NodeMailer',
-          'List-Unsubscribe': unsubscribeUrl ? `<${unsubscribeUrl}>` : `<mailto:${senderEmail}?subject=unsubscribe>`
+          'List-Unsubscribe': unsubscribeUrl ? `<${unsubscribeUrl}>` : `<mailto:${senderEmail}?subject=unsubscribe>`,
+          'Precedence': 'bulk'
         }
       };
 
@@ -151,9 +147,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe Delay (2.0s - 3.0s) to prevent spam detection
+    // Human-like unpredictable interval (3.0 seconds to 2.0 seconds)
     if (index < recipients.length - 1) {
-      const waitTime = Math.floor(1500 + Math.random() * 1500);
+      const waitTime = Math.floor(1200 + Math.random() * 1300);
       let elapsedTime = 0;
       while (elapsedTime < waitTime) {
         const sleepStep = Math.min(1000, waitTime - elapsedTime);
@@ -168,7 +164,6 @@ app.post("/api/send-stream", async (req, res) => {
   res.end();
 });
 
-/* STOP ROUTE */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
