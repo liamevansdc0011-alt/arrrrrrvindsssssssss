@@ -22,25 +22,15 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   1. UNIQUE REFERENCE CODE & HASH GENERATOR (Anti-Spam Fingerprint)
+   1. Dynamic Reference Code Generator (Clean Format)
    ========================================================================== */
-function generateReferenceData() {
+function generateRefCode() {
   const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const timeStamp = Date.now().toString().slice(-4);
-  
-  // Example Ref Code: REF-8F3A-9201
-  const refCode = `REF-${randomHex}-${timeStamp}`;
-  
-  // Invisible Hash to break duplicate content hashing by Gmail AI
-  const invisibleHash = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">
-    [RefID: ${crypto.randomBytes(8).toString('hex')}]
-  </div>`;
-
-  return { refCode, invisibleHash };
+  return `REF-${randomHex}`;
 }
 
 /* ==========================================================================
-   2. TRANSPORTER POOLING
+   2. Transporter Pooling (Gmail Direct TLS Pool)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -48,11 +38,13 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true, // SSL Connection
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // Single connection to avoid rapid socket bans
-      maxMessages: 100
+      maxConnections: 1,
+      maxMessages: 50
     });
     transporters.set(cacheKey, transporter);
   }
@@ -78,7 +70,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   4. HTML TO PLAIN-TEXT CONVERTER
+   4. HTML TO PLAIN-TEXT FALLBACK
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -118,7 +110,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE
+   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE (1.1 Sec Speed)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -152,49 +144,28 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
-      
-      // Generate Unique Reference ID for this specific mail
-      const { refCode, invisibleHash } = generateReferenceData();
+      const refCode = generateRefCode();
 
       const spunSubject = parseSpintax(subject);
       let spunBody = parseSpintax(messageBody);
 
-      // Append Reference Code Footer to Mail Body
-      const referenceFooterHtml = `
-        <br/><br/>
-        <hr style="border:none;border-top:1px solid #e0e0e0;margin:20px 0;"/>
-        <p style="font-size:11px;color:#888888;font-family:sans-serif;margin:0;">
-          Reference Code: <strong>${refCode}</strong> | Sent via Secure Mail Protocol
-        </p>
-        ${invisibleHash}
-      `;
-
-      const referenceFooterText = `\n\n---\nReference Code: ${refCode}`;
-
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Unique Message ID generation for email standards compliance
-      const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
-      const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
-
+      // Clean Standard Options (Gmail manages Message-ID naturally)
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: `${spunSubject} [#${refCode.slice(-8)}]`, // Unique subject suffix
-        messageId: customMessageId,
+        subject: spunSubject,
         headers: {
-          'X-Entity-Ref-ID': refCode,
-          'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe%20${refCode}>`,
-          'Date': new Date().toUTCString()
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`
         }
       };
 
       if (isHtml) {
-        mailOptions.html = spunBody + referenceFooterHtml;
-        mailOptions.text = convertHtmlToText(spunBody) + referenceFooterText;
+        mailOptions.html = spunBody;
+        mailOptions.text = convertHtmlToText(spunBody);
       } else {
-        mailOptions.text = spunBody + referenceFooterText;
+        mailOptions.text = spunBody;
       }
 
       await transporter.sendMail(mailOptions);
@@ -205,11 +176,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR SIMULATION DELAY (1.8s - 3.2s)
-    // Dynamic delay keeps sending speed natural to pass Google AI checks
+    // Fixed Speed Delay: ~1.1 Seconds (1100 ms)
     if (index < recipients.length - 1) {
-      const dynamicDelay = 400 + Math.floor(Math.random() * 300);
-      await new Promise(resolve => setTimeout(resolve, dynamicDelay));
+      await new Promise(resolve => setTimeout(resolve, 1100));
     }
   }
 
