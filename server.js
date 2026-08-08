@@ -3,17 +3,16 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
-import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'aa';
 
-// Middleware Setup
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
+
+// Express Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -22,25 +21,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   1. UNIQUE REFERENCE CODE & HASH GENERATOR (Anti-Spam Fingerprint)
-   ========================================================================== */
-function generateReferenceData() {
-  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const timeStamp = Date.now().toString().slice(-4);
-  
-  // Ref Code Format: REF-8F3A-9201
-  const refCode = `REF-${randomHex}-${timeStamp}`;
-  
-  // Invisible Hash to break duplicate content hashing by Gmail AI
-  const invisibleHash = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">
-    [RefID: ${crypto.randomBytes(8).toString('hex')}]
-  </div>`;
-
-  return { refCode, invisibleHash };
-}
-
-/* ==========================================================================
-   2. TRANSPORTER POOLING
+   TRANSPORTER POOLING (TLS Socket Reuse)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -51,7 +32,7 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // Single connection to avoid rapid socket bans
+      maxConnections: 3,
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -60,12 +41,12 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   3. SPINTAX PARSER ({Hi|Hello|Hey})
+   SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
-  const regex = /\{([^{}]+)\}/g;
+  const regex = /{([^{}]+)}/g;
   let iterations = 0;
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
@@ -78,7 +59,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   4. HTML TO PLAIN-TEXT CONVERTER
+   HTML TO PLAIN-TEXT FALLBACK (Dual Multipart MIME)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -91,12 +72,14 @@ function convertHtmlToText(html) {
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
 /* ==========================================================================
-   5. AUTHENTICATION ROUTES
+   AUTHENTICATION ROUTES
    ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
@@ -118,13 +101,13 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE
+   SSE STREAM ROUTE (STABLE & SECURE LOOP)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('X-Accel-Buffering', 'no'); // Prevents proxy buffering on Vercel/Nginx
 
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
@@ -148,64 +131,39 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
+    // Connection keep-alive ping
     res.write(': keep-alive\n\n');
 
     try {
       const transporter = getTransporter(email, appPassword);
-      
-      // 1. Generate Reference Code & Hidden Anti-Spam Hash
-      const { refCode, invisibleHash } = generateReferenceData();
-
-      // 2. Parse Spintax
       const spunSubject = parseSpintax(subject);
-      let spunBody = parseSpintax(messageBody);
-
-      // 3. Format Body Content (Guarantees Reference Footer in Body)
-      const formattedHtmlBody = spunBody.includes('<') && spunBody.includes('>') 
-        ? spunBody 
-        : spunBody.replace(/\n/g, '<br/>');
-
-      const referenceFooterHtml = `
-        <br/><br/>
-        <div style="border-top:1px solid #e0e0e0;margin-top:20px;padding-top:10px;font-size:12px;color:#666666;font-family:Arial,sans-serif;">
-          Reference ID: <strong style="color:#2563eb;">${refCode}</strong> | Ticket Code: ${crypto.randomBytes(3).toString('hex').toUpperCase()}
-        </div>
-        ${invisibleHash}
-      `;
-
-      const referenceFooterText = `\n\n----------------------------------------\nReference ID: ${refCode}`;
-
-      // 4. Custom RFC-Compliant Headers
-      const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
-      const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
+      const spunBody = parseSpintax(messageBody);
+      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject,
-        messageId: customMessageId,
-        html: formattedHtmlBody + referenceFooterHtml, // Always send HTML with Reference Code
-        text: convertHtmlToText(spunBody) + referenceFooterText, // Fallback Plain Text with Reference Code
-        headers: {
-          'X-Entity-Ref-ID': refCode,
-          'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe%20${refCode}>`,
-          'Date': new Date().toUTCString()
-        }
+        subject: spunSubject
       };
 
+      if (isHtml) {
+        mailOptions.html = spunBody;
+        mailOptions.text = convertHtmlToText(spunBody);
+      } else {
+        mailOptions.text = spunBody;
+      }
+
       await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient, refCode })}\n\n`);
+      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
 
     } catch (error) {
       console.error(`Error sending to ${recipient}:`, error.message);
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR SIMULATION DELAY (1.8s - 3.2s)
+    // Safe 1.5-Second Delay to avoid socket crashing
     if (index < recipients.length - 1) {
-      const dynamicDelay = 1800 + Math.floor(Math.random() * 1400);
-      await new Promise(resolve => setTimeout(resolve, dynamicDelay));
+      await new Promise(resolve => setTimeout(resolve, 400));
     }
   }
 
@@ -214,15 +172,14 @@ app.post("/api/send-stream", async (req, res) => {
 });
 
 /* ==========================================================================
-   7. STOP ROUTE
+   STOP ROUTE
    ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
+/* ==========================================================================
+   VERCEL / SERVERLESS HANDLER EXPORT
+   ========================================================================== */
 export default app;
