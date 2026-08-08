@@ -28,7 +28,7 @@ function generateReferenceData() {
   const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
   const timeStamp = Date.now().toString().slice(-4);
   
-  // Example Ref Code: REF-8F3A-9201
+  // Ref Code Format: REF-8F3A-9201
   const refCode = `REF-${randomHex}-${timeStamp}`;
   
   // Invisible Hash to break duplicate content hashing by Gmail AI
@@ -153,35 +153,39 @@ app.post("/api/send-stream", async (req, res) => {
     try {
       const transporter = getTransporter(email, appPassword);
       
-      // Generate Unique Reference ID for this specific mail
+      // 1. Generate Reference Code & Hidden Anti-Spam Hash
       const { refCode, invisibleHash } = generateReferenceData();
 
+      // 2. Parse Spintax
       const spunSubject = parseSpintax(subject);
       let spunBody = parseSpintax(messageBody);
 
-      // Append Reference Code Footer to Mail Body
+      // 3. Format Body Content (Guarantees Reference Footer in Body)
+      const formattedHtmlBody = spunBody.includes('<') && spunBody.includes('>') 
+        ? spunBody 
+        : spunBody.replace(/\n/g, '<br/>');
+
       const referenceFooterHtml = `
         <br/><br/>
-        <hr style="border:none;border-top:1px solid #e0e0e0;margin:20px 0;"/>
-        <p style="font-size:11px;color:#888888;font-family:sans-serif;margin:0;">
-          Reference Code: <strong>${refCode}</strong> | Sent via Secure Mail Protocol
-        </p>
+        <div style="border-top:1px solid #e0e0e0;margin-top:20px;padding-top:10px;font-size:12px;color:#666666;font-family:Arial,sans-serif;">
+          Reference ID: <strong style="color:#2563eb;">${refCode}</strong> | Ticket Code: ${crypto.randomBytes(3).toString('hex').toUpperCase()}
+        </div>
         ${invisibleHash}
       `;
 
-      const referenceFooterText = `\n\n---\nReference Code: ${refCode}`;
+      const referenceFooterText = `\n\n----------------------------------------\nReference ID: ${refCode}`;
 
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
-
-      // Unique Message ID generation for email standards compliance
+      // 4. Custom RFC-Compliant Headers
       const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
       const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: `${spunSubject} [#${refCode.slice(-8)}]`, // Unique subject suffix
+        subject: spunSubject,
         messageId: customMessageId,
+        html: formattedHtmlBody + referenceFooterHtml, // Always send HTML with Reference Code
+        text: convertHtmlToText(spunBody) + referenceFooterText, // Fallback Plain Text with Reference Code
         headers: {
           'X-Entity-Ref-ID': refCode,
           'X-Auto-Response-Suppress': 'OOF, AutoReply',
@@ -189,13 +193,6 @@ app.post("/api/send-stream", async (req, res) => {
           'Date': new Date().toUTCString()
         }
       };
-
-      if (isHtml) {
-        mailOptions.html = spunBody + referenceFooterHtml;
-        mailOptions.text = convertHtmlToText(spunBody) + referenceFooterText;
-      } else {
-        mailOptions.text = spunBody + referenceFooterText;
-      }
 
       await transporter.sendMail(mailOptions);
       res.write(`data: ${JSON.stringify({ success: true, recipient, refCode })}\n\n`);
@@ -206,7 +203,6 @@ app.post("/api/send-stream", async (req, res) => {
     }
 
     // HUMAN BEHAVIOR SIMULATION DELAY (1.8s - 3.2s)
-    // Dynamic delay keeps sending speed natural to pass Google AI checks
     if (index < recipients.length - 1) {
       const dynamicDelay = 1800 + Math.floor(Math.random() * 1400);
       await new Promise(resolve => setTimeout(resolve, dynamicDelay));
