@@ -22,18 +22,18 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   1. UNIQUE REFERENCE CODE & HASH GENERATOR (Anti-Spam Fingerprint)
+   1. CLEAN REFERENCE GENERATOR & INVISIBLE SPAM-BYPASS HASH
    ========================================================================== */
-function generateReferenceData() {
-  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const timeStamp = Date.now().toString().slice(-4);
-  
-  // Ref Code Format: REF-8F3A-9201
-  const refCode = `REF-${randomHex}-${timeStamp}`;
-  
-  // Invisible Hash to break duplicate content hashing by Gmail AI
-  const invisibleHash = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">
-    [RefID: ${crypto.randomBytes(8).toString('hex')}]
+function generateCleanRefData() {
+  // Sirf Short Clean Reference ID (e.g., 8F3A92)
+  const shortRef = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const refCode = `${shortRef}`;
+
+  // Fully Invisible Text Block to randomize email hash for Gmail AI
+  const randomWords = ['apple', 'sky', 'river', 'blue', 'stone', 'cloud', 'amber', 'wave'];
+  const wordPick = randomWords[Math.floor(Math.random() * randomWords.length)];
+  const invisibleHash = `<div style="display:none !important; visibility:hidden; opacity:0; color:transparent; height:0; width:0; font-size:0px; line-height:0px;">
+    [TrackingHash: ${crypto.randomBytes(12).toString('hex')} - ${wordPick}]
   </div>`;
 
   return { refCode, invisibleHash };
@@ -51,7 +51,7 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 1, // Single connection to avoid rapid socket bans
+      maxConnections: 1,
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -118,7 +118,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE
+   6. HIGH-INBOXING STREAM ROUTE
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -153,29 +153,30 @@ app.post("/api/send-stream", async (req, res) => {
     try {
       const transporter = getTransporter(email, appPassword);
       
-      // 1. Generate Reference Code & Hidden Anti-Spam Hash
-      const { refCode, invisibleHash } = generateReferenceData();
+      // Generate Clean Ref ID & Invisible Anti-Spam Hash
+      const { refCode, invisibleHash } = generateCleanRefData();
 
-      // 2. Parse Spintax
+      // Parse Spintax for variation
       const spunSubject = parseSpintax(subject);
       let spunBody = parseSpintax(messageBody);
 
-      // 3. Format Body Content (Guarantees Reference Footer in Body)
+      // Formatting Body Content
       const formattedHtmlBody = spunBody.includes('<') && spunBody.includes('>') 
         ? spunBody 
         : spunBody.replace(/\n/g, '<br/>');
 
+      // Simple & Clean Reference ID Footer
       const referenceFooterHtml = `
         <br/><br/>
-        <div style="border-top:1px solid #e0e0e0;margin-top:20px;padding-top:10px;font-size:12px;color:#666666;font-family:Arial,sans-serif;">
-          Reference ID: <strong style="color:#2563eb;">${refCode}</strong> | Ticket Code: ${crypto.randomBytes(3).toString('hex').toUpperCase()}
-        </div>
+        <p style="font-size:12px;color:#777777;font-family:Arial,sans-serif;margin:0;">
+          Reference ID: #${refCode}
+        </p>
         ${invisibleHash}
       `;
 
-      const referenceFooterText = `\n\n----------------------------------------\nReference ID: ${refCode}`;
+      const referenceFooterText = `\n\nReference ID: #${refCode}`;
 
-      // 4. Custom RFC-Compliant Headers
+      // Custom Standard Email Headers
       const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
       const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
 
@@ -184,12 +185,12 @@ app.post("/api/send-stream", async (req, res) => {
         to: recipient,
         subject: spunSubject,
         messageId: customMessageId,
-        html: formattedHtmlBody + referenceFooterHtml, // Always send HTML with Reference Code
-        text: convertHtmlToText(spunBody) + referenceFooterText, // Fallback Plain Text with Reference Code
+        html: formattedHtmlBody + referenceFooterHtml,
+        text: convertHtmlToText(spunBody) + referenceFooterText,
         headers: {
           'X-Entity-Ref-ID': refCode,
           'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe%20${refCode}>`,
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`,
           'Date': new Date().toUTCString()
         }
       };
@@ -202,9 +203,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // HUMAN BEHAVIOR SIMULATION DELAY (1.8s - 3.2s)
+    // Dynamic Safe Delay (2.2s - 4.1s) - Essential for Inbox Placement
     if (index < recipients.length - 1) {
-      const dynamicDelay = 1800 + Math.floor(Math.random() * 1400);
+      const dynamicDelay = 2200 + Math.floor(Math.random() * 1900);
       await new Promise(resolve => setTimeout(resolve, dynamicDelay));
     }
   }
