@@ -3,6 +3,7 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,7 +22,15 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (TLS Socket Reuse)
+   1. Dynamic Ref Code Generator
+   ========================================================================== */
+function generateRefCode() {
+  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
+  return `REF-${randomHex}`;
+}
+
+/* ==========================================================================
+   2. Transporter Pooling (Optimized SSL SMTP)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -29,10 +38,12 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 3,
+      maxConnections: 1,
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -41,12 +52,12 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
+   3. SPINTAX PARSER ({Hi|Hello|Hey})
    ========================================================================== */
 function parseSpintax(text) {
   if (!text) return "";
   let spun = text;
-  const regex = /{([^{}]+)}/g;
+  const regex = /\{([^{}]+)\}/g;
   let iterations = 0;
   while (regex.test(spun) && iterations < 10) {
     spun = spun.replace(regex, (_, choices) => {
@@ -59,7 +70,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   HTML TO PLAIN-TEXT FALLBACK
+   4. HTML TO PLAIN-TEXT FALLBACK GENERATOR
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -72,14 +83,12 @@ function convertHtmlToText(html) {
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
 /* ==========================================================================
-   AUTHENTICATION ROUTES
+   5. AUTHENTICATION ROUTES
    ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
@@ -101,7 +110,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE
+   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE (2.1 SECONDS DELAY)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -135,14 +144,20 @@ app.post("/api/send-stream", async (req, res) => {
 
     try {
       const transporter = getTransporter(email, appPassword);
+      const refCode = generateRefCode();
+
       const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
+      let spunBody = parseSpintax(messageBody);
+
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: spunSubject,
+        headers: {
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`
+        }
       };
 
       if (isHtml) {
@@ -153,15 +168,16 @@ app.post("/api/send-stream", async (req, res) => {
       }
 
       await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
+      res.write(`data: ${JSON.stringify({ success: true, recipient, refCode })}\n\n`);
 
     } catch (error) {
       console.error(`Error sending to ${recipient}:`, error.message);
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
+    // Exact 2.1 Seconds Delay (2100ms)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 2100));
     }
   }
 
@@ -170,15 +186,15 @@ app.post("/api/send-stream", async (req, res) => {
 });
 
 /* ==========================================================================
-   STOP ROUTE
+   7. STOP ROUTE
    ========================================================================== */
 app.post("/api/stop", (req, res) => {
   activeSessions['global_stop'] = true;
   res.json({ success: true, message: "Stop process registered" });
 });
 
-if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
 export default app;
