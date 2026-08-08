@@ -22,7 +22,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   1. Dynamic Ref Code Generator
+   1. Dynamic Ref Code Generator (Clean Standard)
    ========================================================================== */
 function generateRefCode() {
   const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
@@ -110,7 +110,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE (2.1 SECONDS DELAY)
+   6. SAFE & INBOX-OPTIMIZED STREAM ROUTE
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -175,9 +175,10 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Exact 2.1 Seconds Delay (2100ms)
+    // Natural sending interval (1.2s - 2.1s)
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 2100));
+      const naturalDelay = 1200 + Math.floor(Math.random() * 900);
+      await new Promise(resolve => setTimeout(resolve, naturalDelay));
     }
   }
 
