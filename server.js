@@ -131,9 +131,9 @@ app.post('/api/send-stream', async (req, res) => {
             res.write(`data: ${JSON.stringify({ success: false, recipient, error: err.message })}\n\n`);
         }
 
-        // Random Delay between 2.0s to 2.0s (Critical to avoid Gmail rate limits & spam flagging)
+        // Random Delay between 2.5s to 4.5s (Critical to avoid Gmail rate limits & spam flagging)
         if (i < recipients.length - 1 && !isStopRequested) {
-            const randomDelay = Math.floor(Math.random() * (2000 - 800 + 1)) + 2500;
+            const randomDelay = Math.floor(Math.random() * (4500 - 2500 + 1)) + 2500;
             await delay(randomDelay);
         }
     }
