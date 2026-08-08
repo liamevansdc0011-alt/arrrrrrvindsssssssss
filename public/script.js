@@ -118,6 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
             const matches = text.match(emailRegex) || [];
 
+            // Unique clean email list extraction
             extractedEmails = [...new Set(matches.map(e => e.toLowerCase().trim()))];
 
             if (detectedCount) detectedCount.textContent = `${extractedEmails.length} found`;
@@ -137,7 +138,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (progressBar) progressBar.style.width = '0%';
 
         if (statusIcon) statusIcon.className = 'fa-solid fa-circle-notch fa-spin text-primary';
-        if (statusText) statusText.textContent = 'Sending emails 1-by-1...';
+        if (statusText) statusText.textContent = 'Sending emails 1-by-1 (2.1s delay)...';
 
         sendBtn?.classList.add('hidden');
         stopBtn?.classList.remove('hidden');
@@ -190,7 +191,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const turnstileResponse = document.querySelector('[name="cf-turnstile-response"]')?.value || "";
 
             sendBtn.disabled = true;
-            sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
+            sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying SMTP...';
 
             try {
                 const verifyRes = await fetch('/api/verify', {
@@ -201,7 +202,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const verifyResult = await verifyRes.json();
                 if (!verifyResult.success) {
-                    alert(verifyResult.message || 'SMTP Verification failed.');
+                    alert(verifyResult.message || 'SMTP Verification failed. Check App Password.');
                     finishSendingUI();
                     return;
                 }
@@ -224,7 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     })
                 });
 
-                if (!response.ok) throw new Error('Streaming failed.');
+                if (!response.ok) throw new Error('Streaming connection failed.');
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -264,7 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 isSending = false;
                 if (stopRequested) {
                     if (statusIcon) statusIcon.className = 'fa-solid fa-circle-stop text-danger';
-                    if (statusText) statusText.textContent = 'Process stopped.';
+                    if (statusText) statusText.textContent = 'Process stopped by user.';
                 } else {
                     if (statusIcon) statusIcon.className = 'fa-solid fa-circle-check text-success';
                     if (statusText) statusText.textContent = 'Completed!';
@@ -273,7 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             } catch (err) {
                 console.error(err);
-                alert('Connection error occurred.');
+                alert('Connection error occurred during sending process.');
             } finally {
                 isSending = false;
                 finishSendingUI();
@@ -285,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopBtn.addEventListener('click', async () => {
             stopRequested = true;
             if (statusIcon) statusIcon.className = 'fa-solid fa-spinner fa-spin text-warning';
-            if (statusText) statusText.textContent = 'Stopping send process...';
+            if (statusText) statusText.textContent = 'Stopping process...';
             stopBtn.disabled = true;
 
             try {
