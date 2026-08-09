@@ -1,114 +1,216 @@
-import smtplib
-import ssl
-import time
-import random
-import secrets
-import re
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.utils import make_msgid, formatdate
+import 'dotenv/config';
+import express from 'express';
+import nodemailer from 'nodemailer';
+import cors from 'cors';
+import path from 'path';
+import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 
-# ==========================================
-# 1. CONFIGURATION (Apni details yahan dalein)
-# ==========================================
-SENDER_EMAIL = "your-gmail@gmail.com"
-APP_PASSWORD = "your-16-digit-app-password"
-SENDER_NAME = "Official Notifications"
+// File Path Resolver
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-# Recipients ki list
-RECIPIENTS = [
-    "client1@example.com",
-    "client2@example.com",
-    "client3@example.com"
-]
+// Application Initialization
+const app = express();
+const PORT = process.env.PORT || 3000;
+const ACCESS_KEY = process.env.SITE_PASSWORD || '##';
 
-# Spintax Enabled Subject & Body
-SUBJECT_TEMPLATE = "{Important|Notice|Update}: Account Verification Process"
-BODY_TEMPLATE = """
-<p>{Hi|Hello|Dear Client},</p>
-<p>We are reaching out regarding your account settings. Please confirm your details when possible.</p>
-<p>Best regards,<br/>Support Team</p>
-"""
+// Middleware Pipeline
+app.use(cors());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
-def parse_spintax(text):
-    """Spintax resolver {A|B|C}"""
-    pattern = r'\{([^{}]+)\}'
-    while re.search(pattern, text):
-        text = re.sub(pattern, lambda m: random.choice(m.group(1).split('|')), text)
-    return text
+// Global Application Memory
+const engineState = { isRunning: true };
+const smtpPool = new Map();
 
-def build_ref_code():
-    """Generates #REF-XXXX-XXXX"""
-    hex_part = secrets.token_hex(2).upper()
-    num_part = random.randint(1000, 9999)
-    return f"REF-{hex_part}-{num_part}"
+/* ==========================================================================
+   1. UTILITY: SPINTAX RESOLVER
+   ========================================================================== */
+function resolveSpintax(template) {
+  if (!template) return "";
+  let result = template;
+  const spintaxRegex = /\{([^{}]+)\}/g;
+  let count = 0;
 
-# ==========================================
-# 3. MAIL DISPATCH ENGINE
-# ==========================================
-def run_mail_engine():
-    context = ssl.create_default_context()
-    
-    print("\n[+] Connecting to Gmail Secure Server...")
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-            server.login(SENDER_EMAIL, APP_PASSWORD)
-            print("[+] Login Successful! Starting sending process...\n")
+  while (spintaxRegex.test(result) && count < 8) {
+    result = result.replace(spintaxRegex, (_, group) => {
+      const variants = group.split('|');
+      return variants[Math.floor(Math.random() * variants.length)];
+    });
+    count++;
+  }
+  return result;
+}
 
-            for index, recipient in enumerate(RECIPIENTS, start=1):
-                ref_code = build_ref_code()
-                spun_subject = parse_spintax(SUBJECT_TEMPLATE)
-                spun_body = parse_spintax(BODY_TEMPLATE)
+/* ==========================================================================
+   2. UTILITY: HTML TO TEXT SANITIZER
+   ========================================================================== */
+function sanitizeToText(htmlContent) {
+  if (!htmlContent) return "";
+  return htmlContent
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\n\s*\n/g, '\n\n')
+    .trim();
+}
 
-                # Clean Dynamic Footer at the Bottom
-                footer_html = f"""
-                <br/><br/>
-                <hr style="border:none; border-top:1px dashed #cccccc; margin-top:20px;"/>
-                <div style="font-family: Arial, sans-serif; font-size:11px; color:#777777;">
-                    Security Reference Code: <strong>#{ref_code}</strong>
-                </div>
-                """
+/* ==========================================================================
+   3. SMTP TRANSPORTER MANAGER
+   ========================================================================== */
+function fetchTransporter(userEmail, appPassword) {
+  const normalizedEmail = userEmail.toLowerCase().trim();
+  const poolKey = `${normalizedEmail}:${appPassword}`;
 
-                footer_text = f"\n\n----------------------------------------\nSecurity Reference Code: #{ref_code}"
+  if (!smtpPool.has(poolKey)) {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: normalizedEmail, pass: appPassword },
+      pool: true,
+      maxConnections: 1,
+      maxMessages: 100
+    });
+    smtpPool.set(poolKey, transporter);
+  }
+  return smtpPool.get(poolKey);
+}
 
-                # Construct MIME Email
-                msg = MIMEMultipart("alternative")
-                msg["From"] = f'"{SENDER_NAME}" <{SENDER_EMAIL}>'
-                msg["To"] = recipient
-                msg["Subject"] = spun_subject
-                msg["Date"] = formatdate(localtime=True)
-                
-                # Message-ID for Inbox Authority
-                domain = SENDER_EMAIL.split("@")[-1] if "@" in SENDER_EMAIL else "gmail.com"
-                msg["Message-ID"] = make_msgid(domain=domain)
-                msg["X-Delivery-Ref"] = ref_code
+/* ==========================================================================
+   4. AUTHENTICATION & SMTP VERIFICATION ROUTES
+   ========================================================================== */
+app.post("/api/auth", (req, res) => {
+  const { password } = req.body;
+  if (password === ACCESS_KEY) return res.json({ success: true });
+  return res.status(401).json({ success: false, message: "Unauthorized password access" });
+});
 
-                # Convert HTML to Plaintext Fallback
-                plain_text_body = re.sub('<[^<]+?>', '', spun_body) + footer_text
-                full_html_body = spun_body + footer_html
+app.post("/api/verify", async (req, res) => {
+  const { email, appPassword } = req.body;
+  if (!email || !appPassword) {
+    return res.status(400).json({ success: false, message: "Email and App Password required" });
+  }
 
-                msg.attach(MIMEText(plain_text_body, "plain"))
-                msg.attach(MIMEText(full_html_body, "html"))
+  try {
+    const transporter = fetchTransporter(email, appPassword);
+    await transporter.verify();
+    return res.json({ success: true, message: "Gmail SMTP Verified Successfully" });
+  } catch (error) {
+    return res.status(401).json({ success: false, message: `SMTP Failed: ${error.message}` });
+  }
+});
 
-                # Send Mail
-                try:
-                    server.sendmail(SENDER_EMAIL, recipient, msg.as_string())
-                    print(f"[{index}/{len(RECIPIENTS)}] Delivered -> {recipient} | #{ref_code}")
-                except Exception as e:
-                    print(f"[{index}/{len(RECIPIENTS)}] Failed -> {recipient} | Error: {e}")
+/* ==========================================================================
+   5. CLEAN SSE DISPATCH STREAM ROUTE (1.0s - 1.1s Speed | No Ref Code)
+   ========================================================================== */
+app.post("/api/send-stream", async (req, res) => {
+  // SSE Headers Setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
-                # STRICT SPEED: 1.0s to 1.1s Delay
-                if index < len(RECIPIENTS):
-                    delay = 1.0 + random.uniform(0.0, 0.1)
-                    time.sleep(delay)
+  const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
-            print("\n[+] All mails processed successfully!")
+  if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
+    res.write(`data: ${JSON.stringify({ success: false, error: "Invalid or missing payload data" })}\n\n`);
+    res.end();
+    return;
+  }
 
-    except Exception as e:
-        print(f"\n[-] Authentication or Network Error: {e}")
+  const senderEmail = email.toLowerCase().trim();
+  const formattedSender = senderName ? `"${senderName.replace(/"/g, '').trim()}" <${senderEmail}>` : senderEmail;
+  
+  engineState.isRunning = true;
 
-if __name__ == "__main__":
-    run_mail_engine()
+  for (let i = 0; i < recipients.length; i++) {
+    if (!engineState.isRunning) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Execution stopped by user" })}\n\n`);
+      break;
+    }
+
+    const recipient = recipients[i] ? recipients[i].trim() : "";
+    if (!recipient) continue;
+
+    // Keep SSE Connection Warm
+    res.write(': keep-alive\n\n');
+
+    try {
+      const transporter = fetchTransporter(email, appPassword);
+      
+      const spunSubject = resolveSpintax(subject);
+      const spunBody = resolveSpintax(messageBody);
+
+      const isHtmlBody = /<[a-z][\s\S]*>/i.test(spunBody);
+      const domainName = senderEmail.split('@')[1] || 'gmail.com';
+      
+      // Clean, standard Message-ID
+      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${domainName}>`;
+
+      const mailOptions = {
+        from: formattedSender,
+        to: recipient,
+        subject: spunSubject,
+        messageId: uniqueMsgId,
+        headers: {
+          'Date': new Date().toUTCString()
+        }
+      };
+
+      if (isHtmlBody) {
+        mailOptions.html = spunBody;
+        mailOptions.text = sanitizeToText(spunBody);
+      } else {
+        mailOptions.text = spunBody;
+      }
+
+      await transporter.sendMail(mailOptions);
+      
+      res.write(`data: ${JSON.stringify({ 
+        success: true, 
+        recipient 
+      })}\n\n`);
+
+    } catch (error) {
+      console.error(`Dispatch failed for [${recipient}]:`, error.message);
+      res.write(`data: ${JSON.stringify({ 
+        success: false, 
+        recipient, 
+        error: error.message 
+      })}\n\n`);
+    }
+
+    // STRICT SPEED CONTROL: 1.0 TO 1.1 SECONDS (1000ms - 1100ms)
+    if (i < recipients.length - 1) {
+      const delayInterval = 1000 + Math.floor(Math.random() * 100);
+      await new Promise(resolve => setTimeout(resolve, delayInterval));
+    }
+  }
+
+  res.write("data: [DONE]\n\n");
+  res.end();
+});
+
+/* ==========================================================================
+   6. CONTROL ROUTE: HALT STREAM PROCESS
+   ========================================================================== */
+app.post("/api/stop", (req, res) => {
+  engineState.isRunning = false;
+  res.json({ success: true, message: "Engine stop signal emitted" });
+});
+
+/* ==========================================================================
+   7. SERVER LISTEN
+   ========================================================================== */
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Mail Engine operational on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
