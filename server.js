@@ -6,83 +6,58 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
+// File Path Resolver
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Application Initialization
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || '##';
+const ACCESS_KEY = process.env.SITE_PASSWORD || '##';
 
-// Middleware Setup
+// Middleware Pipeline
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const activeSessions = {};
-const transporters = new Map();
+// Global Application Memory
+const engineState = { isRunning: true };
+const smtpPool = new Map();
 
 /* ==========================================================================
-   1. CLEAN REFERENCE GENERATOR & INVISIBLE SPAM-BYPASS HASH
+   1. UTILITY: DYNAMIC REFERENCE CODE GENERATOR (#REF-XXXXX)
    ========================================================================== */
-function generateCleanRefData() {
-  // Sirf Short Clean Reference ID (e.g., 8F3A92)
-  const shortRef = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const refCode = `${shortRef}`;
-
-  // Fully Invisible Text Block to randomize email hash for Gmail AI
-  const randomWords = ['apple', 'sky', 'river', 'blue', 'stone', 'cloud', 'amber', 'wave'];
-  const wordPick = randomWords[Math.floor(Math.random() * randomWords.length)];
-  const invisibleHash = `<div style="display:none !important; visibility:hidden; opacity:0; color:transparent; height:0; width:0; font-size:0px; line-height:0px;">
-    [TrackingHash: ${crypto.randomBytes(12).toString('hex')} - ${wordPick}]
-  </div>`;
-
-  return { refCode, invisibleHash };
+function buildRefCode() {
+  const hexPart = crypto.randomBytes(2).toString('hex').toUpperCase();
+  const numPart = Math.floor(1000 + Math.random() * 9000);
+  return `REF-${hexPart}-${numPart}`;
 }
 
 /* ==========================================================================
-   2. TRANSPORTER POOLING
+   2. UTILITY: SPINTAX RESOLVER
    ========================================================================== */
-function getTransporter(email, appPassword) {
-  const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
+function resolveSpintax(template) {
+  if (!template) return "";
+  let result = template;
+  const spintaxRegex = /\{([^{}]+)\}/g;
+  let count = 0;
 
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 1,
-      maxMessages: 100
+  while (spintaxRegex.test(result) && count < 8) {
+    result = result.replace(spintaxRegex, (_, group) => {
+      const variants = group.split('|');
+      return variants[Math.floor(Math.random() * variants.length)];
     });
-    transporters.set(cacheKey, transporter);
+    count++;
   }
-  return transporters.get(cacheKey);
+  return result;
 }
 
 /* ==========================================================================
-   3. SPINTAX PARSER ({Hi|Hello|Hey})
+   3. UTILITY: HTML TO TEXT SANITIZER
    ========================================================================== */
-function parseSpintax(text) {
-  if (!text) return "";
-  let spun = text;
-  const regex = /\{([^{}]+)\}/g;
-  let iterations = 0;
-  while (regex.test(spun) && iterations < 10) {
-    spun = spun.replace(regex, (_, choices) => {
-      const options = choices.split('|');
-      return options[Math.floor(Math.random() * options.length)];
-    });
-    iterations++;
-  }
-  return spun;
-}
-
-/* ==========================================================================
-   4. HTML TO PLAIN-TEXT CONVERTER
-   ========================================================================== */
-function convertHtmlToText(html) {
-  if (!html) return "";
-  return html
+function sanitizeToText(htmlContent) {
+  if (!htmlContent) return "";
+  return htmlContent
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -96,31 +71,54 @@ function convertHtmlToText(html) {
 }
 
 /* ==========================================================================
-   5. AUTHENTICATION ROUTES
+   4. SMTP TRANSPORTER MANAGER
+   ========================================================================== */
+function fetchTransporter(userEmail, appPassword) {
+  const normalizedEmail = userEmail.toLowerCase().trim();
+  const poolKey = `${normalizedEmail}:${appPassword}`;
+
+  if (!smtpPool.has(poolKey)) {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: normalizedEmail, pass: appPassword },
+      pool: true,
+      maxConnections: 1,
+      maxMessages: 100
+    });
+    smtpPool.set(poolKey, transporter);
+  }
+  return smtpPool.get(poolKey);
+}
+
+/* ==========================================================================
+   5. AUTHENTICATION & SMTP VERIFICATION ROUTES
    ========================================================================== */
 app.post("/api/auth", (req, res) => {
   const { password } = req.body;
-  if (password === SITE_PASSWORD) return res.json({ success: true });
-  return res.status(401).json({ success: false, message: "Incorrect password" });
+  if (password === ACCESS_KEY) return res.json({ success: true });
+  return res.status(401).json({ success: false, message: "Unauthorized password access" });
 });
 
 app.post("/api/verify", async (req, res) => {
   const { email, appPassword } = req.body;
-  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Credentials required" });
+  if (!email || !appPassword) {
+    return res.status(400).json({ success: false, message: "Email and App Password required" });
+  }
 
   try {
-    const transporter = getTransporter(email, appPassword);
+    const transporter = fetchTransporter(email, appPassword);
     await transporter.verify();
-    return res.json({ success: true, message: "SMTP verified successfully" });
+    return res.json({ success: true, message: "Gmail SMTP Verified Successfully" });
   } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
+    return res.status(401).json({ success: false, message: `SMTP Failed: ${error.message}` });
   }
 });
 
 /* ==========================================================================
-   6. HIGH-INBOXING STREAM ROUTE
+   6. HIGH-PRECISION SSE DISPATCH STREAM ROUTE (1.0s - 1.1s Speed)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
+  // SSE Headers Setup
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -129,84 +127,90 @@ app.post("/api/send-stream", async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipients } = req.body;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: "Invalid or missing payload data" })}\n\n`);
     res.end();
     return;
   }
 
   const senderEmail = email.toLowerCase().trim();
-  const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
+  const formattedSender = senderName ? `"${senderName.replace(/"/g, '').trim()}" <${senderEmail}>` : senderEmail;
+  
+  engineState.isRunning = true;
 
-  activeSessions['global_stop'] = false;
-
-  for (let index = 0; index < recipients.length; index++) {
-    if (activeSessions['global_stop']) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
+  for (let i = 0; i < recipients.length; i++) {
+    if (!engineState.isRunning) {
+      res.write(`data: ${JSON.stringify({ success: false, error: "Execution stopped by user" })}\n\n`);
       break;
     }
 
-    const recipient = recipients[index] ? recipients[index].trim() : "";
+    const recipient = recipients[i] ? recipients[i].trim() : "";
     if (!recipient) continue;
 
+    // Keep SSE Connection Warm
     res.write(': keep-alive\n\n');
 
     try {
-      const transporter = getTransporter(email, appPassword);
+      const transporter = fetchTransporter(email, appPassword);
       
-      // Generate Clean Ref ID & Invisible Anti-Spam Hash
-      const { refCode, invisibleHash } = generateCleanRefData();
+      // Dynamic Ref Code Generation
+      const currentRefCode = buildRefCode();
+      const spunSubject = resolveSpintax(subject);
+      const spunBody = resolveSpintax(messageBody);
 
-      // Parse Spintax for variation
-      const spunSubject = parseSpintax(subject);
-      let spunBody = parseSpintax(messageBody);
-
-      // Formatting Body Content
-      const formattedHtmlBody = spunBody.includes('<') && spunBody.includes('>') 
-        ? spunBody 
-        : spunBody.replace(/\n/g, '<br/>');
-
-      // Simple & Clean Reference ID Footer
-      const referenceFooterHtml = `
-        <br/><br/>
-        <p style="font-size:12px;color:#777777;font-family:Arial,sans-serif;margin:0;">
-          Reference ID: #${refCode}
-        </p>
-        ${invisibleHash}
+      // Clean Bottom Verification Footer
+      const footerHtml = `
+        <div style="margin-top: 30px; padding-top: 15px; border-top: 1px dashed #cccccc; font-family: Helvetica, Arial, sans-serif; font-size: 11px; color: #777777;">
+          <span>Security Reference Code: <strong>#${currentRefCode}</strong></span>
+          <span style="display:none; font-size:0px;">[${crypto.randomBytes(4).toString('hex')}]</span>
+        </div>
       `;
 
-      const referenceFooterText = `\n\nReference ID: #${refCode}`;
+      const footerText = `\n\n----------------------------------------\nSecurity Reference Code: #${currentRefCode}`;
 
-      // Custom Standard Email Headers
-      const messageIdDomain = senderEmail.split('@')[1] || 'gmail.com';
-      const customMessageId = `<${Date.now()}.${crypto.randomBytes(4).toString('hex')}@${messageIdDomain}>`;
+      const isHtmlBody = /<[a-z][\s\S]*>/i.test(spunBody);
+      const domainName = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(3).toString('hex')}@${domainName}>`;
 
       const mailOptions = {
-        from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
+        from: formattedSender,
         to: recipient,
         subject: spunSubject,
-        messageId: customMessageId,
-        html: formattedHtmlBody + referenceFooterHtml,
-        text: convertHtmlToText(spunBody) + referenceFooterText,
+        messageId: uniqueMsgId,
         headers: {
-          'X-Entity-Ref-ID': refCode,
-          'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'List-Unsubscribe': `<mailto:${senderEmail}?subject=Unsubscribe>`,
+          'X-Delivery-Ref': currentRefCode,
+          'X-Mailer': 'Engine-Core-v3',
           'Date': new Date().toUTCString()
         }
       };
 
+      if (isHtmlBody) {
+        mailOptions.html = spunBody + footerHtml;
+        mailOptions.text = sanitizeToText(spunBody) + footerText;
+      } else {
+        mailOptions.text = spunBody + footerText;
+      }
+
       await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient, refCode })}\n\n`);
+      
+      res.write(`data: ${JSON.stringify({ 
+        success: true, 
+        recipient, 
+        refCode: `#${currentRefCode}` 
+      })}\n\n`);
 
     } catch (error) {
-      console.error(`Error sending to ${recipient}:`, error.message);
-      res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
+      console.error(`Dispatch failed for [${recipient}]:`, error.message);
+      res.write(`data: ${JSON.stringify({ 
+        success: false, 
+        recipient, 
+        error: error.message 
+      })}\n\n`);
     }
 
-    // Dynamic Safe Delay (2.2s - 4.1s) - Essential for Inbox Placement
-    if (index < recipients.length - 1) {
-      const dynamicDelay = 2200 + Math.floor(Math.random() * 1900);
-      await new Promise(resolve => setTimeout(resolve, dynamicDelay));
+    // STRICT SPEED CONTROL: 1.0 TO 1.1 SECONDS (1000ms - 1100ms)
+    if (i < recipients.length - 1) {
+      const delayInterval = 1000 + Math.floor(Math.random() * 100);
+      await new Promise(resolve => setTimeout(resolve, delayInterval));
     }
   }
 
@@ -215,15 +219,20 @@ app.post("/api/send-stream", async (req, res) => {
 });
 
 /* ==========================================================================
-   7. STOP ROUTE
+   7. CONTROL ROUTE: HALT STREAM PROCESS
    ========================================================================== */
 app.post("/api/stop", (req, res) => {
-  activeSessions['global_stop'] = true;
-  res.json({ success: true, message: "Stop process registered" });
+  engineState.isRunning = false;
+  res.json({ success: true, message: "Engine stop signal emitted" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+/* ==========================================================================
+   8. SERVER LISTEN
+   ========================================================================== */
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Mail Engine operational on http://localhost:${PORT}`);
+  });
+}
 
 export default app;
