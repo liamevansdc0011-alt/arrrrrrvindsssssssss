@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || "";
+const SITE_PASSWORD = process.env.SITE_aaaa || "";
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
